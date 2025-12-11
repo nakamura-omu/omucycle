@@ -2,11 +2,13 @@
 import { onMounted, ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTasksStore, type Task } from '@/stores/tasks'
+import { useGroupsStore } from '@/stores/groups'
 import { useUserStore } from '@/stores/user'
 
 const route = useRoute()
 const router = useRouter()
 const tasksStore = useTasksStore()
+const groupsStore = useGroupsStore()
 const userStore = useUserStore()
 
 const taskId = computed(() => route.params.taskId as string)
@@ -20,12 +22,16 @@ const editForm = ref({
   due_date: '',
   priority: 'normal' as Task['priority'],
   status: 'not_started' as Task['status'],
+  assignee_id: '' as string,
 })
 
 async function loadTask() {
   if (taskId.value) {
-    await tasksStore.fetchTask(taskId.value)
-    await tasksStore.fetchComments(taskId.value)
+    await Promise.all([
+      tasksStore.fetchTask(taskId.value),
+      tasksStore.fetchComments(taskId.value),
+      groupsStore.fetchMembers(groupId.value),
+    ])
     if (tasksStore.currentTask) {
       editForm.value = {
         title: tasksStore.currentTask.title,
@@ -33,6 +39,7 @@ async function loadTask() {
         due_date: tasksStore.currentTask.due_date || '',
         priority: tasksStore.currentTask.priority,
         status: tasksStore.currentTask.status,
+        assignee_id: tasksStore.currentTask.assignee_id || '',
       }
     }
   }
@@ -177,7 +184,17 @@ const statusOptions: { value: Task['status']; label: string }[] = [
 
           <div class="meta-item">
             <span class="meta-label">担当者</span>
-            <span>{{ tasksStore.currentTask.assignee_name || '未割当' }}</span>
+            <select v-if="isEditing" v-model="editForm.assignee_id">
+              <option value="">未割当</option>
+              <option
+                v-for="member in groupsStore.members"
+                :key="member.id"
+                :value="member.id"
+              >
+                {{ member.name }}
+              </option>
+            </select>
+            <span v-else>{{ tasksStore.currentTask.assignee_name || '未割当' }}</span>
           </div>
         </div>
 

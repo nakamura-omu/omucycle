@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { onMounted, ref, computed } from 'vue'
+import { onMounted, ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTasksStore, type Task } from '@/stores/tasks'
+import { useGroupsStore } from '@/stores/groups'
 import { useUserStore } from '@/stores/user'
 
 const route = useRoute()
 const router = useRouter()
 const tasksStore = useTasksStore()
+const groupsStore = useGroupsStore()
 const userStore = useUserStore()
 
 const groupId = computed(() => route.params.groupId as string)
@@ -17,10 +19,22 @@ const newTask = ref({
   description: '',
   due_date: '',
   priority: 'normal' as Task['priority'],
+  assignee_id: '' as string,
+  parent_task_id: '' as string,
 })
 
-onMounted(() => {
-  tasksStore.fetchGroupTasks(groupId.value)
+onMounted(async () => {
+  await Promise.all([
+    tasksStore.fetchGroupTasks(groupId.value),
+    groupsStore.fetchMembers(groupId.value),
+  ])
+})
+
+watch(() => showCreateModal.value, (val) => {
+  if (val) {
+    // モーダルを開いたらデフォルトで自分をアサイン
+    newTask.value.assignee_id = userStore.currentUser?.id || ''
+  }
 })
 
 function goToTask(taskId: string) {
@@ -37,10 +51,14 @@ async function createTask() {
       description: newTask.value.description || null,
       due_date: newTask.value.due_date || null,
       priority: newTask.value.priority,
+      assignee_id: newTask.value.assignee_id || null,
+      parent_task_id: newTask.value.parent_task_id || null,
       created_by: userStore.currentUser.id,
     })
     showCreateModal.value = false
-    newTask.value = { title: '', description: '', due_date: '', priority: 'normal' }
+    newTask.value = { title: '', description: '', due_date: '', priority: 'normal', assignee_id: '', parent_task_id: '' }
+    // タスク一覧を再取得
+    await tasksStore.fetchGroupTasks(groupId.value)
   } catch (error) {
     console.error('Failed to create task:', error)
   }
@@ -175,6 +193,34 @@ const statusLabels: Record<string, string> = {
             placeholder="タスクの説明（任意）"
             rows="3"
           ></textarea>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>担当者</label>
+            <select v-model="newTask.assignee_id">
+              <option value="">未割当</option>
+              <option
+                v-for="member in groupsStore.members"
+                :key="member.id"
+                :value="member.id"
+              >
+                {{ member.name }}
+              </option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>親タスク</label>
+            <select v-model="newTask.parent_task_id">
+              <option value="">なし（親タスクとして作成）</option>
+              <option
+                v-for="task in tasksStore.parentTasks"
+                :key="task.id"
+                :value="task.id"
+              >
+                {{ task.title }}
+              </option>
+            </select>
+          </div>
         </div>
         <div class="form-row">
           <div class="form-group">
