@@ -25,9 +25,15 @@ jobDefinitionsRoutes.get('/:id', (c) => {
     SELECT * FROM task_templates
     WHERE job_definition_id = ?
     ORDER BY sort_order ASC, relative_days ASC
-  `).all(id);
+  `).all(id) as any[];
 
-  return c.json({ ...definition, templates });
+  // default_assignee_ids をJSONからパース
+  const parsedTemplates = templates.map(t => ({
+    ...t,
+    default_assignee_ids: t.default_assignee_ids ? JSON.parse(t.default_assignee_ids) : null
+  }));
+
+  return c.json({ ...definition, templates: parsedTemplates });
 });
 
 // 業務定義作成
@@ -37,6 +43,7 @@ jobDefinitionsRoutes.post('/', async (c) => {
   const {
     group_id,
     name,
+    prefix,
     category,
     typical_start_month,
     typical_start_week,
@@ -53,12 +60,12 @@ jobDefinitionsRoutes.post('/', async (c) => {
 
   db.prepare(`
     INSERT INTO job_definitions (
-      id, group_id, name, category, typical_start_month,
+      id, group_id, name, prefix, category, typical_start_month,
       typical_start_week, typical_duration_days, owner_role, description
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
-    id, group_id, name, category || null, typical_start_month || null,
+    id, group_id, name, prefix?.toUpperCase() || null, category || null, typical_start_month || null,
     typical_start_week || null, typical_duration_days || null,
     owner_role || null, description || null
   );
@@ -74,7 +81,7 @@ jobDefinitionsRoutes.put('/:id', async (c) => {
   const body = await c.req.json();
 
   const allowedFields = [
-    'name', 'category', 'typical_start_month', 'typical_start_week',
+    'name', 'prefix', 'category', 'typical_start_month', 'typical_start_week',
     'typical_duration_days', 'owner_role', 'description', 'is_active'
   ];
   const updates: string[] = [];
@@ -83,7 +90,12 @@ jobDefinitionsRoutes.put('/:id', async (c) => {
   for (const field of allowedFields) {
     if (body[field] !== undefined) {
       updates.push(`${field} = ?`);
-      params.push(body[field]);
+      // prefixは大文字に変換
+      if (field === 'prefix') {
+        params.push(body[field]?.toUpperCase() || null);
+      } else {
+        params.push(body[field]);
+      }
     }
   }
 
@@ -133,6 +145,8 @@ jobDefinitionsRoutes.post('/:id/templates', async (c) => {
     relative_days = 0,
     description,
     default_assignee_role,
+    default_assignee_id,
+    default_assignee_ids,
     sort_order = 0,
   } = body;
 
@@ -154,16 +168,19 @@ jobDefinitionsRoutes.post('/:id/templates', async (c) => {
 
   const id = uuidv4();
 
+  // default_assignee_ids を JSON文字列に変換
+  const assigneeIdsJson = default_assignee_ids ? JSON.stringify(default_assignee_ids) : null;
+
   db.prepare(`
     INSERT INTO task_templates (
       id, job_definition_id, parent_template_id, depth,
-      title, relative_days, description, default_assignee_role, sort_order
+      title, relative_days, description, default_assignee_role, default_assignee_id, default_assignee_ids, sort_order
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id, jobDefinitionId, parent_template_id || null, depth,
     title, relative_days, description || null,
-    default_assignee_role || null, sort_order
+    default_assignee_role || null, default_assignee_id || null, assigneeIdsJson, sort_order
   );
 
   const template = db.prepare('SELECT * FROM task_templates WHERE id = ?').get(id);
@@ -200,20 +217,28 @@ jobDefinitionsRoutes.post('/:id/instantiate', async (c) => {
   const instanceId = uuidv4();
   const startDate = actual_start || new Date().toISOString().split('T')[0];
 
+  // instance_numberを取得（同じ業務定義の既存インスタンス数 + 1）
+  const existingCount = db.prepare(`
+    SELECT COUNT(*) as count FROM job_instances WHERE job_definition_id = ?
+  `).get(jobDefinitionId) as { count: number };
+  const instanceNumber = existingCount.count + 1;
+
   db.transaction(() => {
     // 年度業務インスタンス作成
     db.prepare(`
-      INSERT INTO job_instances (id, job_definition_id, group_id, fiscal_year, actual_start, status)
-      VALUES (?, ?, ?, ?, ?, 'not_started')
-    `).run(instanceId, jobDefinitionId, definition.group_id, fiscal_year, startDate);
+      INSERT INTO job_instances (id, job_definition_id, group_id, instance_number, fiscal_year, actual_start, status)
+      VALUES (?, ?, ?, ?, ?, ?, 'not_started')
+    `).run(instanceId, jobDefinitionId, definition.group_id, instanceNumber, fiscal_year, startDate);
 
     // テンプレートIDから新タスクIDへのマッピング
     const templateToTask: Record<string, string> = {};
+    let taskNumber = 0;
 
     // タスクを生成
     for (const template of templates) {
       const taskId = uuidv4();
       templateToTask[template.id] = taskId;
+      taskNumber++;
 
       // 期限日を計算
       const dueDate = new Date(startDate);
@@ -226,13 +251,14 @@ jobDefinitionsRoutes.post('/:id/instantiate', async (c) => {
       db.prepare(`
         INSERT INTO tasks (
           id, job_instance_id, group_id, task_template_id, parent_task_id,
-          depth, title, description, due_date, created_by
+          task_number, depth, title, description, due_date, assignee_id, created_by
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         taskId, instanceId, definition.group_id, template.id,
-        parentTaskId, template.depth, template.title,
-        template.description, dueDate.toISOString().split('T')[0], created_by
+        parentTaskId, taskNumber, template.depth, template.title,
+        template.description, dueDate.toISOString().split('T')[0],
+        template.default_assignee_id || null, created_by
       );
     }
   })();
@@ -247,6 +273,68 @@ jobDefinitionsRoutes.post('/:id/instantiate', async (c) => {
   `).get(instanceId);
 
   return c.json(instance, 201);
+});
+
+// タスクテンプレート更新
+jobDefinitionsRoutes.put('/templates/:templateId', async (c) => {
+  const db = getDb();
+  const templateId = c.req.param('templateId');
+  const body = await c.req.json();
+
+  const allowedFields = ['title', 'description', 'relative_days', 'default_assignee_role', 'default_assignee_id', 'default_assignee_ids', 'sort_order'];
+  const updates: string[] = [];
+  const params: any[] = [];
+
+  for (const field of allowedFields) {
+    if (body[field] !== undefined) {
+      updates.push(`${field} = ?`);
+      // default_assignee_ids は JSON文字列に変換
+      if (field === 'default_assignee_ids') {
+        params.push(body[field] ? JSON.stringify(body[field]) : null);
+      } else {
+        params.push(body[field]);
+      }
+    }
+  }
+
+  if (updates.length === 0) {
+    return c.json({ error: 'No fields to update' }, 400);
+  }
+
+  params.push(templateId);
+
+  const result = db.prepare(`
+    UPDATE task_templates
+    SET ${updates.join(', ')}
+    WHERE id = ?
+  `).run(...params);
+
+  if (result.changes === 0) {
+    return c.json({ error: 'Template not found' }, 404);
+  }
+
+  const template = db.prepare('SELECT * FROM task_templates WHERE id = ?').get(templateId);
+  return c.json(template);
+});
+
+// タスクテンプレート削除
+jobDefinitionsRoutes.delete('/templates/:templateId', (c) => {
+  const db = getDb();
+  const templateId = c.req.param('templateId');
+
+  // 子テンプレートがあるか確認
+  const children = db.prepare('SELECT id FROM task_templates WHERE parent_template_id = ?').all(templateId);
+  if (children.length > 0) {
+    return c.json({ error: 'Cannot delete template with children. Delete children first.' }, 400);
+  }
+
+  const result = db.prepare('DELETE FROM task_templates WHERE id = ?').run(templateId);
+
+  if (result.changes === 0) {
+    return c.json({ error: 'Template not found' }, 404);
+  }
+
+  return c.json({ success: true });
 });
 
 // 公開テンプレート一覧

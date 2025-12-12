@@ -35,7 +35,7 @@ tasksRoutes.get('/:id', (c) => {
     FROM tasks t
     LEFT JOIN users u ON t.assignee_id = u.id
     WHERE t.parent_task_id = ?
-    ORDER BY t.sort_order ASC, t.created_at ASC
+    ORDER BY t.created_at ASC
   `).all(id);
 
   return c.json({ ...task, children });

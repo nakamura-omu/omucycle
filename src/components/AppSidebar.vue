@@ -1,12 +1,27 @@
 <script setup lang="ts">
 import { useRoute, useRouter } from 'vue-router'
 import { computed } from 'vue'
+import { useGroupsStore } from '@/stores/groups'
 
 const route = useRoute()
 const router = useRouter()
+const groupsStore = useGroupsStore()
 
-const isGroupPage = computed(() => route.path.startsWith('/groups/'))
-const groupId = computed(() => route.params.groupId as string)
+// 旧形式（/groups/:id）または新形式（/:slug）のどちらか
+const isGroupPage = computed(() => {
+  return route.path.startsWith('/groups/') ||
+    (route.params.groupSlug && !['my', 'inbox', 'flashcard', 'settings'].includes(route.params.groupSlug as string))
+})
+const groupId = computed(() => route.params.groupId as string | undefined)
+const groupSlug = computed(() => route.params.groupSlug as string | undefined)
+
+// ナビゲーション用のベースパス
+const groupBasePath = computed(() => {
+  if (groupSlug.value) {
+    return `/${groupSlug.value}`
+  }
+  return `/groups/${groupId.value}`
+})
 
 const mainNavItems = [
   { path: '/', label: 'グループ一覧', icon: '📁' },
@@ -17,10 +32,12 @@ const mainNavItems = [
 ]
 
 const groupNavItems = computed(() => [
-  { path: `/groups/${groupId.value}`, label: 'ダッシュボード', icon: '🏠', exact: true },
-  { path: `/groups/${groupId.value}/tasks`, label: 'タスク一覧', icon: '📋' },
-  { path: `/groups/${groupId.value}/calendar`, label: '業務カレンダー', icon: '📅' },
-  { path: `/groups/${groupId.value}/job-definitions`, label: '業務定義', icon: '📖' },
+  { path: `${groupBasePath.value}`, label: 'ダッシュボード', icon: '🏠', exact: true },
+  { path: `${groupBasePath.value}/job-definitions`, label: '業務テンプレート', icon: '📖' },
+  { path: `${groupBasePath.value}/job-instances`, label: '業務タスク', icon: '📂' },
+  { path: `${groupBasePath.value}/tasks`, label: '全タスク', icon: '📋' },
+  { path: `${groupBasePath.value}/calendar`, label: 'カレンダー', icon: '📅' },
+  { path: `${groupBasePath.value}/settings`, label: '設定', icon: '⚙️' },
 ])
 
 function navigate(path: string) {

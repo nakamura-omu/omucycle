@@ -15,8 +15,13 @@ onMounted(() => {
   groupsStore.fetchGroups()
 })
 
-function openGroup(groupId: string) {
-  router.push(`/groups/${groupId}`)
+function openGroup(group: typeof groupsStore.groups[0]) {
+  // slugがあればslugベースのURL、なければUUIDベースのURL
+  if (group.slug) {
+    router.push(`/${group.slug}`)
+  } else {
+    router.push(`/groups/${group.id}`)
+  }
 }
 
 async function createGroup() {
@@ -54,7 +59,7 @@ async function createGroup() {
         v-for="group in groupsStore.groups"
         :key="group.id"
         class="group-card"
-        @click="openGroup(group.id)"
+        @click="openGroup(group)"
       >
         <div class="group-icon">📁</div>
         <div class="group-info">

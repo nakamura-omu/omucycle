@@ -6,6 +6,7 @@ import { usersRoutes } from './routes/users.js';
 import { groupsRoutes } from './routes/groups.js';
 import { tasksRoutes } from './routes/tasks.js';
 import { jobDefinitionsRoutes } from './routes/job-definitions.js';
+import { browseRoutes } from './routes/browse.js';
 
 const app = new Hono();
 
@@ -35,6 +36,7 @@ app.route('/api/users', usersRoutes);
 app.route('/api/groups', groupsRoutes);
 app.route('/api/tasks', tasksRoutes);
 app.route('/api/job-definitions', jobDefinitionsRoutes);
+app.route('/api/browse', browseRoutes);
 
 // サーバー起動
 const PORT = parseInt(process.env.API_PORT || '3180');

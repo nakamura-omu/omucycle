@@ -71,7 +71,7 @@ groupsRoutes.put('/:id', async (c) => {
   const db = getDb();
   const id = c.req.param('id');
   const body = await c.req.json();
-  const { name, is_public_templates } = body;
+  const { name, slug, is_public_templates } = body;
 
   const updates: string[] = [];
   const params: any[] = [];
@@ -79,6 +79,10 @@ groupsRoutes.put('/:id', async (c) => {
   if (name !== undefined) {
     updates.push('name = ?');
     params.push(name);
+  }
+  if (slug !== undefined) {
+    updates.push('slug = ?');
+    params.push(slug || null);
   }
   if (is_public_templates !== undefined) {
     updates.push('is_public_templates = ?');
@@ -92,18 +96,25 @@ groupsRoutes.put('/:id', async (c) => {
   updates.push("updated_at = datetime('now')");
   params.push(id);
 
-  const result = db.prepare(`
-    UPDATE groups
-    SET ${updates.join(', ')}
-    WHERE id = ?
-  `).run(...params);
+  try {
+    const result = db.prepare(`
+      UPDATE groups
+      SET ${updates.join(', ')}
+      WHERE id = ?
+    `).run(...params);
 
-  if (result.changes === 0) {
-    return c.json({ error: 'Group not found' }, 404);
+    if (result.changes === 0) {
+      return c.json({ error: 'Group not found' }, 404);
+    }
+
+    const group = db.prepare('SELECT * FROM groups WHERE id = ?').get(id);
+    return c.json(group);
+  } catch (error: any) {
+    if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      return c.json({ error: 'UNIQUE constraint failed: slug already exists' }, 409);
+    }
+    throw error;
   }
-
-  const group = db.prepare('SELECT * FROM groups WHERE id = ?').get(id);
-  return c.json(group);
 });
 
 // グループ削除
@@ -163,19 +174,61 @@ groupsRoutes.post('/:id/members', async (c) => {
   }
 });
 
+// メンバーロール変更
+groupsRoutes.patch('/:groupId/members/:userId/role', async (c) => {
+  const db = getDb();
+  const { groupId, userId } = c.req.param();
+  const body = await c.req.json();
+  const { role } = body;
+
+  if (!role || !['admin', 'member', 'guest'].includes(role)) {
+    return c.json({ error: 'Invalid role. Must be admin, member, or guest' }, 400);
+  }
+
+  // オーナーのロールは変更不可
+  const membership = db.prepare(`
+    SELECT role FROM group_memberships WHERE group_id = ? AND user_id = ?
+  `).get(groupId, userId) as { role: string } | undefined;
+
+  if (!membership) {
+    return c.json({ error: 'Membership not found' }, 404);
+  }
+
+  if (membership.role === 'owner') {
+    return c.json({ error: 'Cannot change owner role' }, 403);
+  }
+
+  db.prepare(`
+    UPDATE group_memberships
+    SET role = ?
+    WHERE group_id = ? AND user_id = ?
+  `).run(role, groupId, userId);
+
+  return c.json({ success: true });
+});
+
 // メンバー削除
 groupsRoutes.delete('/:groupId/members/:userId', (c) => {
   const db = getDb();
   const { groupId, userId } = c.req.param();
 
+  // オーナーは削除不可
+  const membership = db.prepare(`
+    SELECT role FROM group_memberships WHERE group_id = ? AND user_id = ?
+  `).get(groupId, userId) as { role: string } | undefined;
+
+  if (!membership) {
+    return c.json({ error: 'Membership not found' }, 404);
+  }
+
+  if (membership.role === 'owner') {
+    return c.json({ error: 'Cannot remove owner from group' }, 403);
+  }
+
   const result = db.prepare(`
     DELETE FROM group_memberships
     WHERE group_id = ? AND user_id = ?
   `).run(groupId, userId);
-
-  if (result.changes === 0) {
-    return c.json({ error: 'Membership not found' }, 404);
-  }
 
   return c.json({ success: true });
 });
@@ -226,4 +279,57 @@ groupsRoutes.get('/:id/job-definitions', (c) => {
   `).all(id);
 
   return c.json(definitions);
+});
+
+// グループの業務インスタンス一覧（業務タスク）
+groupsRoutes.get('/:id/job-instances', (c) => {
+  const db = getDb();
+  const id = c.req.param('id');
+
+  const instances = db.prepare(`
+    SELECT ji.*,
+           jd.name as job_name,
+           jd.prefix as job_prefix,
+           jd.category,
+           (SELECT COUNT(*) FROM tasks WHERE job_instance_id = ji.id) as task_count,
+           (SELECT COUNT(*) FROM tasks WHERE job_instance_id = ji.id AND status = 'completed') as completed_count
+    FROM job_instances ji
+    LEFT JOIN job_definitions jd ON ji.job_definition_id = jd.id
+    WHERE ji.group_id = ?
+    ORDER BY ji.fiscal_year DESC, ji.actual_start DESC
+  `).all(id);
+
+  return c.json(instances);
+});
+
+// 業務インスタンス詳細（タスク一覧付き）
+groupsRoutes.get('/:groupId/job-instances/:instanceId', (c) => {
+  const db = getDb();
+  const { groupId, instanceId } = c.req.param();
+
+  const instance = db.prepare(`
+    SELECT ji.*,
+           jd.name as job_name,
+           jd.category,
+           jd.description as job_description
+    FROM job_instances ji
+    LEFT JOIN job_definitions jd ON ji.job_definition_id = jd.id
+    WHERE ji.id = ? AND ji.group_id = ?
+  `).get(instanceId, groupId);
+
+  if (!instance) {
+    return c.json({ error: 'Job instance not found' }, 404);
+  }
+
+  // タスク一覧を取得
+  const tasks = db.prepare(`
+    SELECT t.*, u.name as assignee_name, creator.name as created_by_name
+    FROM tasks t
+    LEFT JOIN users u ON t.assignee_id = u.id
+    JOIN users creator ON t.created_by = creator.id
+    WHERE t.job_instance_id = ?
+    ORDER BY t.depth ASC, t.due_date ASC
+  `).all(instanceId);
+
+  return c.json({ ...instance, tasks });
 });

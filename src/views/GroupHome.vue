@@ -1,15 +1,20 @@
 <script setup lang="ts">
-import { onMounted, watch } from 'vue'
+import { onMounted, watch, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useGroupsStore } from '@/stores/groups'
 
 const route = useRoute()
 const groupsStore = useGroupsStore()
 
+// groupIdまたはgroupSlugを取得
+const groupId = computed(() => route.params.groupId as string | undefined)
+const groupSlug = computed(() => route.params.groupSlug as string | undefined)
+
 async function loadGroup() {
-  const groupId = route.params.groupId as string
-  if (groupId) {
-    await groupsStore.fetchGroup(groupId)
+  if (groupId.value) {
+    await groupsStore.fetchGroup(groupId.value)
+  } else if (groupSlug.value) {
+    await groupsStore.fetchGroupBySlug(groupSlug.value)
   }
 }
 
@@ -17,7 +22,7 @@ onMounted(() => {
   loadGroup()
 })
 
-watch(() => route.params.groupId, () => {
+watch([groupId, groupSlug], () => {
   loadGroup()
 })
 </script>

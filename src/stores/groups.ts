@@ -4,6 +4,7 @@ import { ref } from 'vue'
 export interface Group {
   id: string
   name: string
+  slug: string | null
   created_by: string
   created_by_name: string
   member_count: number
@@ -52,6 +53,20 @@ export const useGroupsStore = defineStore('groups', () => {
     }
   }
 
+  async function fetchGroupBySlug(slug: string) {
+    isLoading.value = true
+    try {
+      const res = await fetch(`/api/browse/${slug}`)
+      if (res.ok) {
+        currentGroup.value = await res.json()
+      }
+    } catch (error) {
+      console.error('Failed to fetch group by slug:', error)
+    } finally {
+      isLoading.value = false
+    }
+  }
+
   async function fetchMembers(groupId: string) {
     try {
       const res = await fetch(`/api/groups/${groupId}/members`)
@@ -82,6 +97,7 @@ export const useGroupsStore = defineStore('groups', () => {
     isLoading,
     fetchGroups,
     fetchGroup,
+    fetchGroupBySlug,
     fetchMembers,
     createGroup,
   }

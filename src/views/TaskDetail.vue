@@ -11,8 +11,17 @@ const tasksStore = useTasksStore()
 const groupsStore = useGroupsStore()
 const userStore = useUserStore()
 
-const taskId = computed(() => route.params.taskId as string)
-const groupId = computed(() => route.params.groupId as string)
+// 旧形式または新形式のパラメータ
+const taskId = computed(() => route.params.taskId as string | undefined)
+const groupId = computed(() => route.params.groupId as string | undefined)
+const groupSlug = computed(() => route.params.groupSlug as string | undefined)
+const instanceKey = computed(() => route.params.instanceKey as string | undefined)
+const taskNumber = computed(() => route.params.taskNumber as string | undefined)
+
+const resolvedGroupId = computed(() => {
+  if (groupId.value) return groupId.value
+  return groupsStore.currentGroup?.id || ''
+})
 
 const newComment = ref('')
 const isEditing = ref(false)
@@ -26,21 +35,39 @@ const editForm = ref({
 })
 
 async function loadTask() {
+  let taskData: Task | null = null
+
   if (taskId.value) {
-    await Promise.all([
-      tasksStore.fetchTask(taskId.value),
-      tasksStore.fetchComments(taskId.value),
-      groupsStore.fetchMembers(groupId.value),
-    ])
-    if (tasksStore.currentTask) {
-      editForm.value = {
-        title: tasksStore.currentTask.title,
-        description: tasksStore.currentTask.description || '',
-        due_date: tasksStore.currentTask.due_date || '',
-        priority: tasksStore.currentTask.priority,
-        status: tasksStore.currentTask.status,
-        assignee_id: tasksStore.currentTask.assignee_id || '',
+    // 旧形式
+    await tasksStore.fetchTask(taskId.value)
+    taskData = tasksStore.currentTask
+  } else if (groupSlug.value && instanceKey.value && taskNumber.value) {
+    // 新形式: /api/browse/:slug/:instanceKey/tasks/:taskNumber
+    try {
+      const res = await fetch(`/api/browse/${groupSlug.value}/${instanceKey.value}/tasks/${taskNumber.value}`)
+      if (res.ok) {
+        taskData = await res.json()
+        tasksStore.currentTask = taskData
       }
+    } catch (error) {
+      console.error('Failed to fetch task:', error)
+    }
+  }
+
+  if (taskData) {
+    // コメントとメンバー取得
+    await Promise.all([
+      tasksStore.fetchComments(taskData.id),
+      groupsStore.fetchMembers(resolvedGroupId.value),
+    ])
+
+    editForm.value = {
+      title: taskData.title,
+      description: taskData.description || '',
+      due_date: taskData.due_date || '',
+      priority: taskData.priority,
+      status: taskData.status,
+      assignee_id: taskData.assignee_id || '',
     }
   }
 }
@@ -49,12 +76,16 @@ onMounted(() => {
   loadTask()
 })
 
-watch(taskId, () => {
+watch([taskId, taskNumber], () => {
   loadTask()
 })
 
 function goBack() {
-  router.push(`/groups/${groupId.value}/tasks`)
+  if (groupSlug.value && instanceKey.value) {
+    router.push(`/${groupSlug.value}/${instanceKey.value}`)
+  } else {
+    router.push(`/groups/${resolvedGroupId.value}/tasks`)
+  }
 }
 
 async function submitComment() {

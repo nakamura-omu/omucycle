@@ -11,7 +11,20 @@ const tasksStore = useTasksStore()
 const groupsStore = useGroupsStore()
 const userStore = useUserStore()
 
-const groupId = computed(() => route.params.groupId as string)
+const groupId = computed(() => route.params.groupId as string | undefined)
+const groupSlug = computed(() => route.params.groupSlug as string | undefined)
+
+// 解決されたグループID（slugの場合はstoreから取得）
+const resolvedGroupId = computed(() => {
+  if (groupId.value) return groupId.value
+  return groupsStore.currentGroup?.id || ''
+})
+
+// グループslug（直接またはstoreから取得）
+const resolvedGroupSlug = computed(() => {
+  if (groupSlug.value) return groupSlug.value
+  return groupsStore.currentGroup?.slug || null
+})
 const viewMode = ref<'list' | 'kanban'>('list')
 const showCreateModal = ref(false)
 const newTask = ref({
@@ -25,8 +38,8 @@ const newTask = ref({
 
 onMounted(async () => {
   await Promise.all([
-    tasksStore.fetchGroupTasks(groupId.value),
-    groupsStore.fetchMembers(groupId.value),
+    tasksStore.fetchGroupTasks(resolvedGroupId.value),
+    groupsStore.fetchMembers(resolvedGroupId.value),
   ])
 })
 
@@ -37,8 +50,25 @@ watch(() => showCreateModal.value, (val) => {
   }
 })
 
-function goToTask(taskId: string) {
-  router.push(`/groups/${groupId.value}/tasks/${taskId}`)
+// 拡張されたTask型（インスタンス情報含む）
+interface TaskWithInstanceInfo extends Task {
+  job_prefix?: string | null
+  instance_number?: number | null
+  task_number?: number | null
+}
+
+function goToTask(task: TaskWithInstanceInfo) {
+  // インスタンスに紐づくタスクで、slug/prefix/instance_number/task_numberがあれば新URL形式
+  if (resolvedGroupSlug.value && task.job_prefix && task.instance_number && task.task_number) {
+    const instanceKey = `${task.job_prefix}-${task.instance_number}`
+    router.push(`/${resolvedGroupSlug.value}/${instanceKey}/tasks/${task.task_number}`)
+  } else if (resolvedGroupSlug.value) {
+    // slugあるけどインスタンス情報がない場合
+    router.push(`/${resolvedGroupSlug.value}/tasks/${task.id}`)
+  } else {
+    // 旧形式
+    router.push(`/groups/${resolvedGroupId.value}/tasks/${task.id}`)
+  }
 }
 
 async function createTask() {
@@ -46,7 +76,7 @@ async function createTask() {
 
   try {
     await tasksStore.createTask({
-      group_id: groupId.value,
+      group_id: resolvedGroupId.value,
       title: newTask.value.title.trim(),
       description: newTask.value.description || null,
       due_date: newTask.value.due_date || null,
@@ -58,7 +88,7 @@ async function createTask() {
     showCreateModal.value = false
     newTask.value = { title: '', description: '', due_date: '', priority: 'normal', assignee_id: '', parent_task_id: '' }
     // タスク一覧を再取得
-    await tasksStore.fetchGroupTasks(groupId.value)
+    await tasksStore.fetchGroupTasks(resolvedGroupId.value)
   } catch (error) {
     console.error('Failed to create task:', error)
   }
@@ -124,7 +154,7 @@ const statusLabels: Record<string, string> = {
         :key="task.id"
         class="task-row"
         :class="{ completed: task.status === 'completed' }"
-        @click="goToTask(task.id)"
+        @click="goToTask(task as TaskWithInstanceInfo)"
       >
         <button class="checkbox" @click="toggleStatus(task, $event)">
           {{ task.status === 'completed' ? '☑' : '☐' }}
@@ -162,7 +192,7 @@ const statusLabels: Record<string, string> = {
             v-for="task in tasksStore.tasksByStatus[status as keyof typeof tasksStore.tasksByStatus]"
             :key="task.id"
             class="kanban-card"
-            @click="goToTask(task.id)"
+            @click="goToTask(task as TaskWithInstanceInfo)"
           >
             <div class="card-title">{{ task.title }}</div>
             <div class="card-meta">
