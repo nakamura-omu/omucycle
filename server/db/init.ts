@@ -25,6 +25,124 @@ db.exec(schema);
 
 console.log('Schema created successfully.');
 
+// === マイグレーション ===
+console.log('Running migrations...');
+
+// 1. tasksテーブルのstatus CHECK制約を削除 & assignee_ids追加
+const tasksTableInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'").get() as { sql: string } | undefined;
+if (tasksTableInfo && tasksTableInfo.sql.includes("CHECK(status IN ('not_started', 'in_progress', 'completed'))")) {
+  console.log('Migrating tasks table: removing status CHECK constraint...');
+
+  // バックアップテーブルを作成
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tasks_new (
+      id TEXT PRIMARY KEY,
+      job_instance_id TEXT REFERENCES job_instances(id) ON DELETE SET NULL,
+      group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      task_template_id TEXT REFERENCES task_templates(id) ON DELETE SET NULL,
+      parent_task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+      task_number INTEGER,
+      depth INTEGER DEFAULT 0 CHECK(depth BETWEEN 0 AND 2),
+      title TEXT NOT NULL,
+      description TEXT,
+      start_date TEXT,
+      due_date TEXT,
+      status TEXT DEFAULT 'not_started',
+      priority TEXT CHECK(priority IN ('urgent', 'important', 'normal', 'none')) DEFAULT 'normal',
+      assignee_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+      assignee_ids TEXT,
+      created_by TEXT NOT NULL REFERENCES users(id),
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+
+  // データをコピー
+  db.exec(`
+    INSERT INTO tasks_new (id, job_instance_id, group_id, task_template_id, parent_task_id, task_number, depth, title, description, start_date, due_date, status, priority, assignee_id, created_by, created_at, updated_at)
+    SELECT id, job_instance_id, group_id, task_template_id, parent_task_id, task_number, depth, title, description, start_date, due_date, status, priority, assignee_id, created_by, created_at, updated_at
+    FROM tasks;
+  `);
+
+  // 古いテーブルを削除して新しいテーブルをリネーム
+  db.exec('DROP TABLE tasks;');
+  db.exec('ALTER TABLE tasks_new RENAME TO tasks;');
+
+  // インデックスを再作成
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_task_group_id ON tasks(group_id);
+    CREATE INDEX IF NOT EXISTS idx_task_assignee_id ON tasks(assignee_id);
+    CREATE INDEX IF NOT EXISTS idx_task_due_date ON tasks(due_date);
+    CREATE INDEX IF NOT EXISTS idx_task_status ON tasks(status);
+    CREATE INDEX IF NOT EXISTS idx_task_parent_id ON tasks(parent_task_id);
+  `);
+
+  console.log('Tasks table migrated successfully.');
+} else {
+  // assignee_ids列がなければ追加
+  const columns = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+  if (!columns.find(c => c.name === 'assignee_ids')) {
+    console.log('Adding assignee_ids column to tasks table...');
+    db.exec('ALTER TABLE tasks ADD COLUMN assignee_ids TEXT;');
+    console.log('assignee_ids column added.');
+  }
+}
+
+// 2. task_templatesにrelative_days列を追加
+const ttColumns = db.prepare("PRAGMA table_info(task_templates)").all() as { name: string }[];
+if (!ttColumns.find(c => c.name === 'relative_days')) {
+  console.log('Adding relative_days column to task_templates table...');
+  db.exec('ALTER TABLE task_templates ADD COLUMN relative_days INTEGER DEFAULT 0;');
+  console.log('relative_days column added.');
+}
+
+// 3. job_instancesにname列を追加
+const jiColumns = db.prepare("PRAGMA table_info(job_instances)").all() as { name: string }[];
+if (!jiColumns.find(c => c.name === 'name')) {
+  console.log('Adding name column to job_instances table...');
+  db.exec('ALTER TABLE job_instances ADD COLUMN name TEXT;');
+  console.log('name column added.');
+}
+
+// 4. 既存グループにデフォルトステータスを追加
+const groupsWithoutStatuses = db.prepare(`
+  SELECT g.id FROM groups g
+  WHERE NOT EXISTS (
+    SELECT 1 FROM group_statuses gs WHERE gs.group_id = g.id
+  )
+`).all() as { id: string }[];
+
+if (groupsWithoutStatuses.length > 0) {
+  console.log(`Adding default statuses to ${groupsWithoutStatuses.length} groups...`);
+  const insertStatus = db.prepare(`
+    INSERT INTO group_statuses (id, group_id, key, label, color, sort_order, is_done)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const defaultStatuses = [
+    { key: 'not_started', label: '未着手', color: '#94a3b8', sort_order: 0, is_done: 0 },
+    { key: 'in_progress', label: '進行中', color: '#3b82f6', sort_order: 1, is_done: 0 },
+    { key: 'completed', label: '完了', color: '#22c55e', sort_order: 2, is_done: 1 },
+  ];
+
+  for (const group of groupsWithoutStatuses) {
+    for (const status of defaultStatuses) {
+      insertStatus.run(uuidv4(), group.id, status.key, status.label, status.color, status.sort_order, status.is_done);
+    }
+  }
+  console.log('Default statuses added.');
+}
+
+// 5. tasksにsort_order列を追加
+const taskColumns = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+if (!taskColumns.find(c => c.name === 'sort_order')) {
+  console.log('Adding sort_order column to tasks table...');
+  db.exec('ALTER TABLE tasks ADD COLUMN sort_order INTEGER DEFAULT 0;');
+  console.log('sort_order column added.');
+}
+
+console.log('Migrations complete.');
+
 // デモ用の初期データを挿入
 const demoUserId = uuidv4();
 const demoGroupId = uuidv4();
@@ -62,14 +180,14 @@ if (!existingUser) {
   // デモタスクテンプレート
   const taskTemplateId = uuidv4();
   db.prepare(`
-    INSERT INTO task_templates (id, job_definition_id, depth, title, relative_days, description)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(taskTemplateId, jobDefId, 0, '式次第作成', 0, '入学式の式次第を作成');
+    INSERT INTO task_templates (id, job_definition_id, depth, title, description)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(taskTemplateId, jobDefId, 0, '式次第作成', '入学式の式次第を作成');
 
   db.prepare(`
-    INSERT INTO task_templates (id, job_definition_id, parent_template_id, depth, title, relative_days, description)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(uuidv4(), jobDefId, taskTemplateId, 1, '来賓リスト確認', 5, '来賓の出席確認と挨拶順序の決定');
+    INSERT INTO task_templates (id, job_definition_id, parent_template_id, depth, title, description)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(uuidv4(), jobDefId, taskTemplateId, 1, '来賓リスト確認', '来賓の出席確認と挨拶順序の決定');
 
   // 年度業務インスタンス
   const jobInstanceId = uuidv4();
@@ -81,14 +199,14 @@ if (!existingUser) {
   // デモタスク
   const taskId = uuidv4();
   db.prepare(`
-    INSERT INTO tasks (id, job_instance_id, group_id, depth, title, description, due_date, status, priority, assignee_id, created_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(taskId, jobInstanceId, demoGroupId, 0, '式次第作成', '入学式の式次第を作成する。昨年度のものをベースに変更点を反映。', '2025-03-20', 'not_started', 'urgent', demoUserId, demoUserId);
+    INSERT INTO tasks (id, job_instance_id, group_id, depth, title, description, start_date, due_date, status, priority, assignee_id, created_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(taskId, jobInstanceId, demoGroupId, 0, '式次第作成', '入学式の式次第を作成する。昨年度のものをベースに変更点を反映。', '2025-03-01', '2025-03-20', 'not_started', 'urgent', demoUserId, demoUserId);
 
   db.prepare(`
-    INSERT INTO tasks (id, job_instance_id, group_id, parent_task_id, depth, title, description, due_date, status, priority, assignee_id, created_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(uuidv4(), jobInstanceId, demoGroupId, taskId, 1, '来賓挨拶順確認', '来賓の挨拶順序を確認する', '2025-03-15', 'not_started', 'important', demoUserId, demoUserId);
+    INSERT INTO tasks (id, job_instance_id, group_id, parent_task_id, depth, title, description, start_date, due_date, status, priority, assignee_id, created_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(uuidv4(), jobInstanceId, demoGroupId, taskId, 1, '来賓挨拶順確認', '来賓の挨拶順序を確認する', '2025-03-05', '2025-03-15', 'not_started', 'important', demoUserId, demoUserId);
 
   // デモコメント
   db.prepare(`

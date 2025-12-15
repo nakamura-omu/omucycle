@@ -1,14 +1,30 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
+import { useGroupsStore } from '@/stores/groups'
 
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
+const groupsStore = useGroupsStore()
 
-const groupId = computed(() => route.params.groupId as string)
+const groupId = computed(() => route.params.groupId as string | undefined)
+const groupSlug = computed(() => route.params.groupSlug as string | undefined)
 const jobId = computed(() => route.params.jobId as string)
+
+// 解決されたグループID（slugの場合はjobから取得）
+const resolvedGroupId = computed(() => {
+  if (groupId.value) return groupId.value
+  if (job.value?.group_id) return job.value.group_id
+  return groupsStore.currentGroup?.id || ''
+})
+
+// 解決されたグループslug
+const resolvedGroupSlug = computed(() => {
+  if (groupSlug.value) return groupSlug.value
+  return groupsStore.currentGroup?.slug || null
+})
 
 interface TaskTemplate {
   id: string
@@ -85,7 +101,7 @@ async function fetchJob() {
     if (res.ok) {
       job.value = await res.json()
     } else {
-      router.push(`/groups/${groupId.value}/job-definitions`)
+      goBack()
     }
   } catch (error) {
     console.error('Failed to fetch job definition:', error)
@@ -95,8 +111,9 @@ async function fetchJob() {
 }
 
 async function fetchMembers() {
+  if (!resolvedGroupId.value) return
   try {
-    const res = await fetch(`/api/groups/${groupId.value}/members`)
+    const res = await fetch(`/api/groups/${resolvedGroupId.value}/members`)
     if (res.ok) {
       members.value = await res.json()
     }
@@ -171,7 +188,12 @@ async function instantiateJob() {
       const instance = await res.json()
       alert(`${instance.task_count}件のタスクが作成されました`)
       showInstantiateModal.value = false
-      router.push(`/groups/${groupId.value}/tasks`)
+      // slugがあれば新URL形式
+      if (resolvedGroupSlug.value) {
+        router.push(`/${resolvedGroupSlug.value}/job-instances`)
+      } else {
+        router.push(`/groups/${resolvedGroupId.value}/job-instances`)
+      }
     } else {
       const err = await res.json()
       alert(err.error || 'インスタンス化に失敗しました')
@@ -208,7 +230,11 @@ function closeTemplateModal() {
 }
 
 function goBack() {
-  router.push(`/groups/${groupId.value}/job-definitions`)
+  if (resolvedGroupSlug.value) {
+    router.push(`/${resolvedGroupSlug.value}/job-definitions`)
+  } else {
+    router.push(`/groups/${resolvedGroupId.value}/job-definitions`)
+  }
 }
 
 function openEditTemplateModal(template: TaskTemplate) {
@@ -292,9 +318,19 @@ const templateTree = computed(() => {
   return roots.map(buildTree)
 })
 
+// jobが取得されたらmembersを取得
+watch(job, (newJob) => {
+  if (newJob) {
+    fetchMembers()
+  }
+})
+
 onMounted(() => {
   fetchJob()
-  fetchMembers()
+  // groupIdが既にある場合は先にmembersも取得
+  if (groupId.value) {
+    fetchMembers()
+  }
 })
 </script>
 

@@ -33,3 +33,7 @@ data/
 .env
 .env.local
 .env.*.local
+
+# Dev server management
+.pids/
+.logs/

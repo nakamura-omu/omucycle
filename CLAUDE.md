@@ -245,6 +245,41 @@ npm run type-check
 - アバタープレビュー
 - メールアドレス・認証タイプは表示のみ
 
+### カスタムステータス
+グループごとにタスクのステータスをカスタマイズ可能。
+
+**データ構造:**
+```
+group_statuses テーブル
+├── id           -- ステータスID
+├── group_id     -- グループID
+├── key          -- 内部キー（例: review, waiting_approval）
+├── label        -- 表示名（例: レビュー中）
+├── color        -- カンバン列の色
+├── sort_order   -- 表示順
+├── is_done      -- 完了扱いか（進捗計算用）
+└── created_at
+```
+
+**デフォルトステータス:**
+- 未着手 (not_started) - グレー
+- 進行中 (in_progress) - 青
+- 完了 (completed) - 緑、is_done=true
+
+**カスタマイズ例:**
+- レビュー中 (review) - オレンジ
+- 承認待ち (waiting_approval) - 紫
+
+**設定方法:**
+グループ設定画面（/:slug/settings）の「タスクステータス」セクションで追加・編集・削除が可能。
+
+**API:**
+- `GET /api/groups/:id/statuses` - ステータス一覧
+- `POST /api/groups/:id/statuses` - ステータス追加
+- `PUT /api/groups/:groupId/statuses/:statusId` - ステータス更新
+- `DELETE /api/groups/:groupId/statuses/:statusId` - ステータス削除
+- `PUT /api/groups/:id/statuses/reorder` - 順序変更
+
 ## URL設計
 
 ### 人間が読みやすいURL形式
@@ -337,3 +372,59 @@ Body: { fiscal_year: 2024, actual_start: "2024-04-01", created_by: "user-id" }
 - チェックボックス形式でメンバー一覧から複数選択
 - 選択済みの担当者はハイライト表示
 - タスク一覧では複数担当者をそれぞれバッジ表示
+
+### タスクのドラッグ＆ドロップ
+
+タスク一覧でドラッグ＆ドロップによる並び替えが可能。
+
+**機能:**
+- タスクをドラッグして順序を変更
+- 他のタスクの上にドロップで子タスク化
+- 階層は最大3レベル（depth: 0, 1, 2）まで
+- 自分自身や子孫を親にする操作は自動的にブロック
+
+**データ構造:**
+- `tasks.sort_order`: 同一階層内での表示順（INTEGER）
+- `tasks.depth`: 階層の深さ（0=ルート、1=子、2=孫）
+- `tasks.parent_task_id`: 親タスクへの参照
+
+**API:**
+- `PATCH /api/tasks/:id/reorder` - 単一タスクの並び替え
+- `POST /api/tasks/reorder-bulk` - 複数タスクの一括並び替え（トランザクション処理）
+
+### タスク一覧のステータス表示
+
+タスク一覧でステータスをバッジ表示。
+
+**特徴:**
+- 優先度（●）の横にステータスラベルをバッジ表示
+- 完了ステータスは✓マークで表現（バッジ非表示）
+- 背景色に応じて文字色を自動調整（コントラスト確保）
+  - 明るい背景 → 黒文字
+  - 暗い背景 → 白文字
+
+**実装:**
+```typescript
+// YIQ方式で輝度を計算
+const luminance = (r * 299 + g * 587 + b * 114) / 1000
+return luminance >= 128 ? '#333333' : '#ffffff'
+```
+
+## 開発サーバー管理
+
+開発サーバーの起動・停止を管理するスクリプト。
+
+**コマンド:**
+```bash
+npm run dev:start      # API + フロントエンド起動
+npm run dev:stop       # 全サーバー停止
+npm run dev:restart    # 全サーバー再起動
+npm run dev:restart-api # APIサーバーのみ再起動
+npm run dev:status     # サーバー状態確認
+npm run dev:logs       # ログ表示
+```
+
+**ファイル構成:**
+- `scripts/dev-server.sh` - サーバー管理スクリプト
+- `.pids/` - PIDファイル格納ディレクトリ
+- `.logs/` - ログファイル格納ディレクトリ

@@ -25,11 +25,45 @@ const resolvedGroupSlug = computed(() => {
   if (groupSlug.value) return groupSlug.value
   return groupsStore.currentGroup?.slug || null
 })
+
+// グループステータス
+interface GroupStatus {
+  id: string
+  group_id: string
+  key: string
+  label: string
+  color: string
+  sort_order: number
+  is_done: number
+}
+const groupStatuses = ref<GroupStatus[]>([])
+
+async function fetchGroupStatuses() {
+  try {
+    const res = await fetch(`/api/groups/${resolvedGroupId.value}/statuses`)
+    if (res.ok) {
+      groupStatuses.value = await res.json()
+    }
+  } catch (error) {
+    console.error('Failed to fetch group statuses:', error)
+  }
+}
+
+// ステータスごとにグループ化したタスク
+const tasksByStatus = computed(() => {
+  const result: Record<string, Task[]> = {}
+  for (const status of groupStatuses.value) {
+    result[status.key] = tasksStore.tasks.filter(t => t.status === status.key)
+  }
+  return result
+})
+
 const viewMode = ref<'list' | 'kanban'>('list')
 const showCreateModal = ref(false)
 const newTask = ref({
   title: '',
   description: '',
+  start_date: '',
   due_date: '',
   priority: 'normal' as Task['priority'],
   assignee_id: '' as string,
@@ -40,6 +74,7 @@ onMounted(async () => {
   await Promise.all([
     tasksStore.fetchGroupTasks(resolvedGroupId.value),
     groupsStore.fetchMembers(resolvedGroupId.value),
+    fetchGroupStatuses(),
   ])
 })
 
@@ -79,6 +114,7 @@ async function createTask() {
       group_id: resolvedGroupId.value,
       title: newTask.value.title.trim(),
       description: newTask.value.description || null,
+      start_date: newTask.value.start_date || null,
       due_date: newTask.value.due_date || null,
       priority: newTask.value.priority,
       assignee_id: newTask.value.assignee_id || null,
@@ -86,7 +122,7 @@ async function createTask() {
       created_by: userStore.currentUser.id,
     })
     showCreateModal.value = false
-    newTask.value = { title: '', description: '', due_date: '', priority: 'normal', assignee_id: '', parent_task_id: '' }
+    newTask.value = { title: '', description: '', start_date: '', due_date: '', priority: 'normal', assignee_id: '', parent_task_id: '' }
     // タスク一覧を再取得
     await tasksStore.fetchGroupTasks(resolvedGroupId.value)
   } catch (error) {
@@ -96,7 +132,11 @@ async function createTask() {
 
 async function toggleStatus(task: Task, e: Event) {
   e.stopPropagation()
-  const newStatus = task.status === 'completed' ? 'not_started' : 'completed'
+  const isDone = doneStatusKeys.value.includes(task.status)
+  // 完了なら最初のステータスに、そうでなければ最初の完了ステータスに
+  const firstStatus = groupStatuses.value[0]?.key || 'not_started'
+  const firstDoneStatus = groupStatuses.value.find(s => s.is_done)?.key || 'completed'
+  const newStatus = isDone ? firstStatus : firstDoneStatus
   await tasksStore.updateStatus(task.id, newStatus)
 }
 
@@ -115,11 +155,28 @@ const priorityLabels: Record<string, string> = {
   none: 'なし',
 }
 
-const statusLabels: Record<string, string> = {
-  not_started: '未着手',
-  in_progress: '進行中',
-  completed: '完了',
-}
+// ステータスラベル（グループステータスから動的生成）
+const statusLabels = computed(() => {
+  const result: Record<string, string> = {}
+  for (const status of groupStatuses.value) {
+    result[status.key] = status.label
+  }
+  return result
+})
+
+// ステータス色
+const statusColors = computed(() => {
+  const result: Record<string, string> = {}
+  for (const status of groupStatuses.value) {
+    result[status.key] = status.color
+  }
+  return result
+})
+
+// 完了ステータスのキー一覧
+const doneStatusKeys = computed(() =>
+  groupStatuses.value.filter(s => s.is_done).map(s => s.key)
+)
 </script>
 
 <template>
@@ -153,11 +210,11 @@ const statusLabels: Record<string, string> = {
         v-for="task in tasksStore.parentTasks"
         :key="task.id"
         class="task-row"
-        :class="{ completed: task.status === 'completed' }"
+        :class="{ completed: doneStatusKeys.includes(task.status) }"
         @click="goToTask(task as TaskWithInstanceInfo)"
       >
         <button class="checkbox" @click="toggleStatus(task, $event)">
-          {{ task.status === 'completed' ? '☑' : '☐' }}
+          {{ doneStatusKeys.includes(task.status) ? '☑' : '☐' }}
         </button>
         <div class="task-content">
           <span class="task-title">{{ task.title }}</span>
@@ -180,16 +237,19 @@ const statusLabels: Record<string, string> = {
     </div>
 
     <!-- カンバン表示 -->
-    <div v-else class="kanban-view">
+    <div v-else class="kanban-view" :style="{ gridTemplateColumns: `repeat(${groupStatuses.length}, 1fr)` }">
       <div
-        v-for="(label, status) in statusLabels"
-        :key="status"
+        v-for="status in groupStatuses"
+        :key="status.key"
         class="kanban-column"
       >
-        <h3 class="column-header">{{ label }}</h3>
+        <h3 class="column-header" :style="{ borderLeftColor: status.color }">
+          {{ status.label }}
+          <span class="column-count">{{ tasksByStatus[status.key]?.length || 0 }}</span>
+        </h3>
         <div class="column-tasks">
           <div
-            v-for="task in tasksStore.tasksByStatus[status as keyof typeof tasksStore.tasksByStatus]"
+            v-for="task in tasksByStatus[status.key]"
             :key="task.id"
             class="kanban-card"
             @click="goToTask(task as TaskWithInstanceInfo)"
@@ -254,9 +314,15 @@ const statusLabels: Record<string, string> = {
         </div>
         <div class="form-row">
           <div class="form-group">
+            <label>開始日</label>
+            <input v-model="newTask.start_date" type="date" />
+          </div>
+          <div class="form-group">
             <label>期限</label>
             <input v-model="newTask.due_date" type="date" />
           </div>
+        </div>
+        <div class="form-row">
           <div class="form-group">
             <label>優先度</label>
             <select v-model="newTask.priority">
@@ -266,6 +332,7 @@ const statusLabels: Record<string, string> = {
               <option value="none">なし</option>
             </select>
           </div>
+          <div class="form-group"></div>
         </div>
         <div class="modal-actions">
           <button class="btn btn-secondary" @click="showCreateModal = false">
@@ -408,12 +475,11 @@ const statusLabels: Record<string, string> = {
 /* カンバン表示 */
 .kanban-view {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
   gap: 1rem;
 }
 
 .kanban-column {
-  background: #e9ecef;
+  background: #f3f4f6;
   border-radius: 8px;
   padding: 0.75rem;
   min-height: 400px;
@@ -422,9 +488,24 @@ const statusLabels: Record<string, string> = {
 .column-header {
   font-size: 0.875rem;
   font-weight: 600;
-  color: #495057;
+  color: #374151;
   margin: 0 0 0.75rem 0;
-  padding: 0.25rem 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid #6b7280;
+  background: white;
+  border-radius: 4px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.column-count {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: #6b7280;
+  background: #e5e7eb;
+  padding: 0.125rem 0.5rem;
+  border-radius: 10px;
 }
 
 .column-tasks {

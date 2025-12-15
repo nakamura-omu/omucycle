@@ -7,6 +7,12 @@
     "dev": "vite --port 5180",
     "dev:server": "node --import tsx server/index.ts",
     "dev:all": "concurrently \"npm run dev\" \"npm run dev:server\"",
+    "dev:start": "./scripts/dev-server.sh start",
+    "dev:stop": "./scripts/dev-server.sh stop",
+    "dev:restart": "./scripts/dev-server.sh restart",
+    "dev:restart-api": "./scripts/dev-server.sh restart-api",
+    "dev:status": "./scripts/dev-server.sh status",
+    "dev:logs": "./scripts/dev-server.sh logs",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
     "db:init": "node --import tsx server/db/init.ts"

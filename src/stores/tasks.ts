@@ -10,10 +10,12 @@ export interface Task {
   depth: number
   title: string
   description: string | null
+  start_date: string | null
   due_date: string | null
-  status: 'not_started' | 'in_progress' | 'completed'
+  status: string
   priority: 'urgent' | 'important' | 'normal' | 'none'
   assignee_id: string | null
+  assignee_ids: string[] | null
   assignee_name: string | null
   created_by: string
   created_by_name: string
@@ -118,7 +120,7 @@ export const useTasksStore = defineStore('tasks', () => {
     throw new Error('Failed to update task')
   }
 
-  async function updateStatus(taskId: string, status: Task['status']) {
+  async function updateStatus(taskId: string, status: string) {
     const res = await fetch(`/api/tasks/${taskId}/status`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },

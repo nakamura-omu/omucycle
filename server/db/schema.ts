@@ -25,6 +25,19 @@ CREATE TABLE IF NOT EXISTS groups (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- グループステータス定義
+CREATE TABLE IF NOT EXISTS group_statuses (
+  id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,
+  label TEXT NOT NULL,
+  color TEXT DEFAULT '#6b7280',
+  sort_order INTEGER DEFAULT 0,
+  is_done INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(group_id, key)
+);
+
 -- グループメンバーシップ
 CREATE TABLE IF NOT EXISTS group_memberships (
   id TEXT PRIMARY KEY,
@@ -59,8 +72,8 @@ CREATE TABLE IF NOT EXISTS task_templates (
   parent_template_id TEXT REFERENCES task_templates(id) ON DELETE SET NULL,
   depth INTEGER DEFAULT 0 CHECK(depth BETWEEN 0 AND 2),
   title TEXT NOT NULL,
-  relative_days INTEGER DEFAULT 0,
   description TEXT,
+  relative_days INTEGER DEFAULT 0,
   default_assignee_role TEXT,
   default_assignee_id TEXT REFERENCES users(id) ON DELETE SET NULL,
   default_assignee_ids TEXT,
@@ -84,6 +97,7 @@ CREATE TABLE IF NOT EXISTS job_instances (
   id TEXT PRIMARY KEY,
   job_definition_id TEXT REFERENCES job_definitions(id) ON DELETE SET NULL,
   group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  name TEXT,
   instance_number INTEGER,
   fiscal_year INTEGER NOT NULL,
   actual_start TEXT,
@@ -104,10 +118,13 @@ CREATE TABLE IF NOT EXISTS tasks (
   depth INTEGER DEFAULT 0 CHECK(depth BETWEEN 0 AND 2),
   title TEXT NOT NULL,
   description TEXT,
+  start_date TEXT,
   due_date TEXT,
-  status TEXT CHECK(status IN ('not_started', 'in_progress', 'completed')) DEFAULT 'not_started',
+  status TEXT DEFAULT 'not_started',
   priority TEXT CHECK(priority IN ('urgent', 'important', 'normal', 'none')) DEFAULT 'normal',
   assignee_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  assignee_ids TEXT,
+  sort_order INTEGER DEFAULT 0,
   created_by TEXT NOT NULL REFERENCES users(id),
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
@@ -121,6 +138,16 @@ CREATE TABLE IF NOT EXISTS task_comments (
   content TEXT NOT NULL,
   is_ai_generated INTEGER DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- コメントリアクション
+CREATE TABLE IF NOT EXISTS comment_reactions (
+  id TEXT PRIMARY KEY,
+  comment_id TEXT NOT NULL REFERENCES task_comments(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  emoji TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(comment_id, user_id, emoji)
 );
 
 -- 判断ログ（AI意思決定）
