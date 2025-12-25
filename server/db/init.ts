@@ -141,6 +141,16 @@ if (!taskColumns.find(c => c.name === 'sort_order')) {
   console.log('sort_order column added.');
 }
 
+// 6. job_definitionsに利用回数・前回開始日・更新者情報を追加
+const jdColumns = db.prepare("PRAGMA table_info(job_definitions)").all() as { name: string }[];
+if (!jdColumns.find(c => c.name === 'usage_count')) {
+  console.log('Adding usage_count, last_used_at, updated_by columns to job_definitions table...');
+  db.exec('ALTER TABLE job_definitions ADD COLUMN usage_count INTEGER DEFAULT 0;');
+  db.exec('ALTER TABLE job_definitions ADD COLUMN last_used_at TEXT;');
+  db.exec('ALTER TABLE job_definitions ADD COLUMN updated_by TEXT REFERENCES users(id) ON DELETE SET NULL;');
+  console.log('job_definitions columns added.');
+}
+
 console.log('Migrations complete.');
 
 // デモ用の初期データを挿入

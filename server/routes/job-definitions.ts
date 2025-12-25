@@ -82,7 +82,7 @@ jobDefinitionsRoutes.put('/:id', async (c) => {
 
   const allowedFields = [
     'name', 'prefix', 'category', 'typical_start_month', 'typical_start_week',
-    'typical_duration_days', 'owner_role', 'description', 'is_active'
+    'typical_duration_days', 'owner_role', 'description', 'is_active', 'updated_by'
   ];
   const updates: string[] = [];
   const params: any[] = [];
@@ -229,6 +229,16 @@ jobDefinitionsRoutes.post('/:id/instantiate', async (c) => {
       INSERT INTO job_instances (id, job_definition_id, group_id, instance_number, fiscal_year, actual_start, status)
       VALUES (?, ?, ?, ?, ?, ?, 'not_started')
     `).run(instanceId, jobDefinitionId, definition.group_id, instanceNumber, fiscal_year, startDate);
+
+    // 業務定義の利用回数・前回開始日を更新
+    db.prepare(`
+      UPDATE job_definitions
+      SET usage_count = usage_count + 1,
+          last_used_at = datetime('now'),
+          updated_by = ?,
+          updated_at = datetime('now')
+      WHERE id = ?
+    `).run(created_by, jobDefinitionId);
 
     // テンプレートIDから新タスクIDへのマッピング
     const templateToTask: Record<string, string> = {};

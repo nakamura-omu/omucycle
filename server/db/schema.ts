@@ -61,6 +61,9 @@ CREATE TABLE IF NOT EXISTS job_definitions (
   owner_role TEXT,
   description TEXT,
   is_active INTEGER DEFAULT 1,
+  usage_count INTEGER DEFAULT 0,
+  last_used_at TEXT,
+  updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
