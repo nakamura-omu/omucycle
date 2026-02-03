@@ -85,6 +85,21 @@ CREATE TABLE IF NOT EXISTS task_templates (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- ワークフロールール
+CREATE TABLE IF NOT EXISTS workflow_rules (
+  id TEXT PRIMARY KEY,
+  job_definition_id TEXT NOT NULL REFERENCES job_definitions(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  trigger_type TEXT NOT NULL,
+  trigger_config TEXT,
+  action_type TEXT NOT NULL,
+  action_config TEXT,
+  is_active INTEGER DEFAULT 1,
+  sort_order INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
 -- テンプレート公開
 CREATE TABLE IF NOT EXISTS template_shares (
   id TEXT PRIMARY KEY,
@@ -153,6 +168,18 @@ CREATE TABLE IF NOT EXISTS comment_reactions (
   UNIQUE(comment_id, user_id, emoji)
 );
 
+-- タスク操作履歴
+CREATE TABLE IF NOT EXISTS task_history (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  action_type TEXT NOT NULL,
+  field_name TEXT,
+  old_value TEXT,
+  new_value TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
 -- 判断ログ（AI意思決定）
 CREATE TABLE IF NOT EXISTS decision_logs (
   id TEXT PRIMARY KEY,
@@ -209,6 +236,33 @@ CREATE TABLE IF NOT EXISTS calendar_views (
   UNIQUE(user_id, group_id)
 );
 
+-- Timez投稿
+CREATE TABLE IF NOT EXISTS timez_posts (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  content TEXT NOT NULL,
+  hashtags TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Timezコメント
+CREATE TABLE IF NOT EXISTS timez_comments (
+  id TEXT PRIMARY KEY,
+  post_id TEXT NOT NULL REFERENCES timez_posts(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  content TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Timezハッシュタグ（トレンド計算用）
+CREATE TABLE IF NOT EXISTS timez_hashtags (
+  id TEXT PRIMARY KEY,
+  post_id TEXT NOT NULL REFERENCES timez_posts(id) ON DELETE CASCADE,
+  hashtag TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
 -- インデックス
 CREATE INDEX IF NOT EXISTS idx_task_group_id ON tasks(group_id);
 CREATE INDEX IF NOT EXISTS idx_task_assignee_id ON tasks(assignee_id);
@@ -219,4 +273,11 @@ CREATE INDEX IF NOT EXISTS idx_membership_user_id ON group_memberships(user_id);
 CREATE INDEX IF NOT EXISTS idx_membership_group_id ON group_memberships(group_id);
 CREATE INDEX IF NOT EXISTS idx_comment_task_id ON task_comments(task_id);
 CREATE INDEX IF NOT EXISTS idx_decision_log_task_id ON decision_logs(task_id);
+CREATE INDEX IF NOT EXISTS idx_timez_posts_user_id ON timez_posts(user_id);
+CREATE INDEX IF NOT EXISTS idx_timez_posts_created_at ON timez_posts(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_timez_comments_post_id ON timez_comments(post_id);
+CREATE INDEX IF NOT EXISTS idx_timez_hashtags_hashtag ON timez_hashtags(hashtag);
+CREATE INDEX IF NOT EXISTS idx_timez_hashtags_created_at ON timez_hashtags(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_history_task_id ON task_history(task_id);
+CREATE INDEX IF NOT EXISTS idx_task_history_created_at ON task_history(created_at DESC);
 `;

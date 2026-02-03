@@ -151,6 +151,90 @@ if (!jdColumns.find(c => c.name === 'usage_count')) {
   console.log('job_definitions columns added.');
 }
 
+// 7. workflow_rulesテーブルの確認（スキーマで作成済みのはず）
+const wrTableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='workflow_rules'").get();
+if (wrTableExists) {
+  console.log('workflow_rules table exists.');
+} else {
+  console.log('Creating workflow_rules table...');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS workflow_rules (
+      id TEXT PRIMARY KEY,
+      job_definition_id TEXT NOT NULL REFERENCES job_definitions(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      trigger_type TEXT NOT NULL,
+      trigger_config TEXT,
+      action_type TEXT NOT NULL,
+      action_config TEXT,
+      is_active INTEGER DEFAULT 1,
+      sort_order INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+  console.log('workflow_rules table created.');
+}
+
+// 8. timez_postsテーブルの確認
+const timezPostsExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='timez_posts'").get();
+if (!timezPostsExists) {
+  console.log('Creating timez tables...');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS timez_posts (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      content TEXT NOT NULL,
+      hashtags TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS timez_comments (
+      id TEXT PRIMARY KEY,
+      post_id TEXT NOT NULL REFERENCES timez_posts(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      content TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS timez_hashtags (
+      id TEXT PRIMARY KEY,
+      post_id TEXT NOT NULL REFERENCES timez_posts(id) ON DELETE CASCADE,
+      hashtag TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_timez_posts_user_id ON timez_posts(user_id);
+    CREATE INDEX IF NOT EXISTS idx_timez_posts_created_at ON timez_posts(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_timez_comments_post_id ON timez_comments(post_id);
+    CREATE INDEX IF NOT EXISTS idx_timez_hashtags_hashtag ON timez_hashtags(hashtag);
+    CREATE INDEX IF NOT EXISTS idx_timez_hashtags_created_at ON timez_hashtags(created_at DESC);
+  `);
+  console.log('timez tables created.');
+} else {
+  console.log('timez tables exist.');
+}
+
+// 9. task_historyテーブルの確認
+const taskHistoryExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='task_history'").get();
+if (!taskHistoryExists) {
+  console.log('Creating task_history table...');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS task_history (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      action_type TEXT NOT NULL,
+      field_name TEXT,
+      old_value TEXT,
+      new_value TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_history_task_id ON task_history(task_id);
+    CREATE INDEX IF NOT EXISTS idx_task_history_created_at ON task_history(created_at DESC);
+  `);
+  console.log('task_history table created.');
+} else {
+  console.log('task_history table exists.');
+}
+
 console.log('Migrations complete.');
 
 // デモ用の初期データを挿入

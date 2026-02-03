@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 
 interface Reaction {
   emoji: string
@@ -18,17 +18,101 @@ interface Comment {
   reactions: Reaction[]
 }
 
+interface HistoryEntry {
+  id: string
+  task_id: string
+  user_id: string
+  user_name: string
+  action_type: string
+  field_name: string | null
+  old_value: string | null
+  new_value: string | null
+  created_at: string
+}
+
 const EMOJI_OPTIONS = ['👍', '❤️', '😊', '👀', '🎉']
 
 const props = defineProps<{
   taskId: string
   currentUserId: string
+  statuses?: { key: string; label: string }[]
 }>()
 
 const comments = ref<Comment[]>([])
+const history = ref<HistoryEntry[]>([])
 const newComment = ref('')
 const isLoading = ref(false)
 const isSending = ref(false)
+const showHistory = ref(false)
+
+// コメントと履歴を統合した表示用リスト
+const timelineItems = computed(() => {
+  if (!showHistory.value) {
+    return comments.value.map(c => ({ type: 'comment' as const, data: c, created_at: c.created_at }))
+  }
+
+  const items: { type: 'comment' | 'history'; data: Comment | HistoryEntry; created_at: string }[] = []
+
+  for (const c of comments.value) {
+    items.push({ type: 'comment', data: c, created_at: c.created_at })
+  }
+  for (const h of history.value) {
+    items.push({ type: 'history', data: h, created_at: h.created_at })
+  }
+
+  // 時系列でソート（古い順）
+  items.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+  return items
+})
+
+async function fetchHistory() {
+  try {
+    const res = await fetch(`/api/tasks/${props.taskId}/history`)
+    if (res.ok) {
+      history.value = await res.json()
+    }
+  } catch (error) {
+    console.error('Failed to fetch history:', error)
+  }
+}
+
+function getFieldLabel(field: string): string {
+  const labels: Record<string, string> = {
+    status: 'ステータス',
+    priority: '優先度',
+    title: 'タイトル',
+    description: '説明',
+    assignee_id: '担当者',
+    assignee_ids: '担当者',
+    start_date: '開始日',
+    due_date: '期限日',
+  }
+  return labels[field] || field
+}
+
+function getStatusLabel(key: string | null): string {
+  if (!key) return '(なし)'
+  const status = props.statuses?.find(s => s.key === key)
+  return status?.label || key
+}
+
+function getPriorityLabel(key: string | null): string {
+  if (!key) return '(なし)'
+  const labels: Record<string, string> = {
+    urgent: '緊急',
+    important: '重要',
+    normal: '通常',
+    none: 'なし',
+  }
+  return labels[key] || key
+}
+
+function formatHistoryValue(field: string | null, value: string | null): string {
+  if (!value) return '(なし)'
+  if (field === 'status') return getStatusLabel(value)
+  if (field === 'priority') return getPriorityLabel(value)
+  return value
+}
 
 async function fetchComments() {
   isLoading.value = true
@@ -137,8 +221,15 @@ function hasReacted(comment: Comment, emoji: string): boolean {
 watch(() => props.taskId, () => {
   if (props.taskId) {
     fetchComments()
+    fetchHistory()
   }
 }, { immediate: true })
+
+watch(showHistory, (val) => {
+  if (val && history.value.length === 0) {
+    fetchHistory()
+  }
+})
 </script>
 
 <template>
@@ -146,51 +237,73 @@ watch(() => props.taskId, () => {
     <div class="comments-header">
       <span>コメント</span>
       <span class="comment-count">{{ comments.length }}</span>
+      <label class="history-toggle">
+        <input type="checkbox" v-model="showHistory" />
+        <span>履歴を表示</span>
+      </label>
     </div>
 
     <div class="comments-list">
       <div v-if="isLoading" class="comments-loading">読み込み中...</div>
-      <div v-else-if="comments.length === 0" class="comments-empty">
+      <div v-else-if="timelineItems.length === 0" class="comments-empty">
         コメントはまだありません
       </div>
-      <div
-        v-else
-        v-for="comment in comments"
-        :key="comment.id"
-        class="comment-item"
-        :class="{
-          'ai-comment': comment.is_ai_generated,
-          'my-comment': comment.user_id === props.currentUserId
-        }"
-      >
-        <div class="comment-header">
-          <span class="comment-author">{{ comment.user_name }}</span>
-          <span class="comment-time">{{ formatTime(comment.created_at) }}</span>
-        </div>
-        <div class="comment-content">{{ comment.content }}</div>
-        <div class="comment-reactions">
-          <button
-            v-for="reaction in comment.reactions"
-            :key="reaction.emoji"
-            class="reaction-badge"
-            :class="{ 'my-reaction': hasReacted(comment, reaction.emoji) }"
-            @click="toggleReaction(comment, reaction.emoji)"
+      <template v-else>
+        <template v-for="item in timelineItems" :key="item.data.id">
+          <!-- コメント -->
+          <div
+            v-if="item.type === 'comment'"
+            class="comment-item"
+            :class="{
+              'ai-comment': (item.data as Comment).is_ai_generated,
+              'my-comment': (item.data as Comment).user_id === props.currentUserId
+            }"
           >
-            {{ reaction.emoji }} {{ reaction.count }}
-          </button>
-          <button class="add-reaction-btn" @click="toggleEmojiPicker(comment.id)">+</button>
-          <div v-if="showEmojiPicker === comment.id" class="emoji-picker">
-            <button
-              v-for="emoji in EMOJI_OPTIONS"
-              :key="emoji"
-              class="emoji-option"
-              @click="toggleReaction(comment, emoji)"
-            >
-              {{ emoji }}
-            </button>
+            <div class="comment-header">
+              <span class="comment-author">{{ (item.data as Comment).user_name }}</span>
+              <span class="comment-time">{{ formatTime(item.created_at) }}</span>
+            </div>
+            <div class="comment-content">{{ (item.data as Comment).content }}</div>
+            <div class="comment-reactions">
+              <button
+                v-for="reaction in (item.data as Comment).reactions"
+                :key="reaction.emoji"
+                class="reaction-badge"
+                :class="{ 'my-reaction': hasReacted(item.data as Comment, reaction.emoji) }"
+                @click="toggleReaction(item.data as Comment, reaction.emoji)"
+              >
+                {{ reaction.emoji }} {{ reaction.count }}
+              </button>
+              <button class="add-reaction-btn" @click="toggleEmojiPicker((item.data as Comment).id)">+</button>
+              <div v-if="showEmojiPicker === (item.data as Comment).id" class="emoji-picker">
+                <button
+                  v-for="emoji in EMOJI_OPTIONS"
+                  :key="emoji"
+                  class="emoji-option"
+                  @click="toggleReaction(item.data as Comment, emoji)"
+                >
+                  {{ emoji }}
+                </button>
+              </div>
+            </div>
           </div>
-        </div>
-      </div>
+          <!-- 履歴 -->
+          <div v-else class="history-item">
+            <div class="history-icon">📝</div>
+            <div class="history-content">
+              <span class="history-user">{{ (item.data as HistoryEntry).user_name }}</span>
+              が
+              <span class="history-field">{{ getFieldLabel((item.data as HistoryEntry).field_name || '') }}</span>
+              を
+              <span class="history-old">{{ formatHistoryValue((item.data as HistoryEntry).field_name, (item.data as HistoryEntry).old_value) }}</span>
+              から
+              <span class="history-new">{{ formatHistoryValue((item.data as HistoryEntry).field_name, (item.data as HistoryEntry).new_value) }}</span>
+              に変更
+            </div>
+            <div class="history-time">{{ formatTime(item.created_at) }}</div>
+          </div>
+        </template>
+      </template>
     </div>
 
     <div class="comment-input-area">
@@ -429,5 +542,71 @@ watch(() => props.taskId, () => {
 
 .emoji-option:hover {
   background: #f0f0f0;
+}
+
+/* 履歴トグル */
+.history-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: #666;
+  cursor: pointer;
+  user-select: none;
+}
+
+.history-toggle input {
+  margin: 0;
+  cursor: pointer;
+}
+
+/* 履歴アイテム */
+.history-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.5rem 0.625rem;
+  background: #fefce8;
+  border-radius: 6px;
+  margin-bottom: 0.5rem;
+  border-left: 3px solid #facc15;
+}
+
+.history-icon {
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}
+
+.history-content {
+  flex: 1;
+  font-size: 0.75rem;
+  color: #666;
+  line-height: 1.5;
+}
+
+.history-user {
+  font-weight: 600;
+  color: #1a1a2e;
+}
+
+.history-field {
+  color: #4338ca;
+}
+
+.history-old {
+  text-decoration: line-through;
+  color: #999;
+}
+
+.history-new {
+  color: #16a34a;
+  font-weight: 500;
+}
+
+.history-time {
+  font-size: 0.65rem;
+  color: #999;
+  flex-shrink: 0;
 }
 </style>

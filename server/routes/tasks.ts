@@ -1,8 +1,26 @@
 import { Hono } from 'hono';
 import { getDb } from '../db/connection.js';
 import { v4 as uuidv4 } from 'uuid';
+import { evaluateStatusChangeRules } from '../services/rule-engine.js';
 
 export const tasksRoutes = new Hono();
+
+// 履歴を記録するヘルパー関数
+function recordHistory(
+  taskId: string,
+  userId: string,
+  actionType: string,
+  fieldName: string | null,
+  oldValue: string | null,
+  newValue: string | null
+) {
+  const db = getDb();
+  const id = uuidv4();
+  db.prepare(`
+    INSERT INTO task_history (id, task_id, user_id, action_type, field_name, old_value, new_value)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, taskId, userId, actionType, fieldName, oldValue, newValue);
+}
 
 // タスク詳細取得
 tasksRoutes.get('/:id', (c) => {
@@ -100,13 +118,27 @@ tasksRoutes.put('/:id', async (c) => {
   const db = getDb();
   const id = c.req.param('id');
   const body = await c.req.json();
+  const userId = body.updated_by; // 更新者ID（フロントエンドから送信）
+
+  // 更新前のタスクを取得（履歴記録用）
+  const oldTask = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as any;
+  if (!oldTask) {
+    return c.json({ error: 'Task not found' }, 404);
+  }
 
   const allowedFields = ['title', 'description', 'start_date', 'due_date', 'status', 'priority', 'assignee_id', 'assignee_ids'];
   const updates: string[] = [];
   const params: any[] = [];
+  const changedFields: { field: string; oldValue: any; newValue: any }[] = [];
 
   for (const field of allowedFields) {
     if (body[field] !== undefined) {
+      const oldValue = oldTask[field];
+      const newValue = body[field];
+      // 値が変わった場合のみ記録
+      if (JSON.stringify(oldValue) !== JSON.stringify(newValue)) {
+        changedFields.push({ field, oldValue, newValue });
+      }
       updates.push(`${field} = ?`);
       params.push(body[field]);
     }
@@ -119,14 +151,24 @@ tasksRoutes.put('/:id', async (c) => {
   updates.push("updated_at = datetime('now')");
   params.push(id);
 
-  const result = db.prepare(`
+  db.prepare(`
     UPDATE tasks
     SET ${updates.join(', ')}
     WHERE id = ?
   `).run(...params);
 
-  if (result.changes === 0) {
-    return c.json({ error: 'Task not found' }, 404);
+  // 履歴を記録
+  if (userId && changedFields.length > 0) {
+    for (const change of changedFields) {
+      recordHistory(
+        id,
+        userId,
+        'update',
+        change.field,
+        change.oldValue != null ? String(change.oldValue) : null,
+        change.newValue != null ? String(change.newValue) : null
+      );
+    }
   }
 
   const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id);
@@ -145,6 +187,22 @@ tasksRoutes.delete('/:id', (c) => {
   }
 
   return c.json({ success: true });
+});
+
+// タスク履歴一覧
+tasksRoutes.get('/:id/history', (c) => {
+  const db = getDb();
+  const id = c.req.param('id');
+
+  const history = db.prepare(`
+    SELECT th.*, u.name as user_name
+    FROM task_history th
+    JOIN users u ON th.user_id = u.id
+    WHERE th.task_id = ?
+    ORDER BY th.created_at DESC
+  `).all(id);
+
+  return c.json(history);
 });
 
 // タスクコメント一覧
@@ -264,10 +322,10 @@ tasksRoutes.patch('/:id/status', async (c) => {
   const db = getDb();
   const id = c.req.param('id');
   const body = await c.req.json();
-  const { status } = body;
+  const { status, updated_by } = body;
 
-  // タスクのgroup_idを取得してステータスを検証
-  const task = db.prepare('SELECT group_id FROM tasks WHERE id = ?').get(id) as { group_id: string } | undefined;
+  // タスクの現在のステータスとgroup_idを取得
+  const task = db.prepare('SELECT group_id, status as current_status FROM tasks WHERE id = ?').get(id) as { group_id: string; current_status: string } | undefined;
   if (!task) {
     return c.json({ error: 'Task not found' }, 404);
   }
@@ -280,6 +338,8 @@ tasksRoutes.patch('/:id/status', async (c) => {
     return c.json({ error: 'Invalid status for this group' }, 400);
   }
 
+  const previousStatus = task.current_status;
+
   const result = db.prepare(`
     UPDATE tasks
     SET status = ?, updated_at = datetime('now')
@@ -290,7 +350,22 @@ tasksRoutes.patch('/:id/status', async (c) => {
     return c.json({ error: 'Task not found' }, 404);
   }
 
-  return c.json({ success: true, status });
+  // 履歴を記録
+  if (updated_by && previousStatus !== status) {
+    recordHistory(id, updated_by, 'status_change', 'status', previousStatus, status);
+  }
+
+  // ワークフロールールを評価・実行
+  let rulesExecuted: any[] = [];
+  if (previousStatus !== status) {
+    try {
+      rulesExecuted = await evaluateStatusChangeRules(id, previousStatus, status);
+    } catch (error) {
+      console.error('Rule evaluation error:', error);
+    }
+  }
+
+  return c.json({ success: true, status, rules_executed: rulesExecuted });
 });
 
 // 優先度変更（簡易API）
@@ -298,12 +373,20 @@ tasksRoutes.patch('/:id/priority', async (c) => {
   const db = getDb();
   const id = c.req.param('id');
   const body = await c.req.json();
-  const { priority } = body;
+  const { priority, updated_by } = body;
 
   const validPriorities = ['urgent', 'important', 'normal', 'none'];
   if (!validPriorities.includes(priority)) {
     return c.json({ error: 'Invalid priority' }, 400);
   }
+
+  // 現在の優先度を取得
+  const task = db.prepare('SELECT priority FROM tasks WHERE id = ?').get(id) as { priority: string } | undefined;
+  if (!task) {
+    return c.json({ error: 'Task not found' }, 404);
+  }
+
+  const previousPriority = task.priority;
 
   const result = db.prepare(`
     UPDATE tasks
@@ -313,6 +396,11 @@ tasksRoutes.patch('/:id/priority', async (c) => {
 
   if (result.changes === 0) {
     return c.json({ error: 'Task not found' }, 404);
+  }
+
+  // 履歴を記録
+  if (updated_by && previousPriority !== priority) {
+    recordHistory(id, updated_by, 'priority_change', 'priority', previousPriority, priority);
   }
 
   return c.json({ success: true, priority });

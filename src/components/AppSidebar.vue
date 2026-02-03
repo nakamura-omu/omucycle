@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useRoute, useRouter } from 'vue-router'
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useGroupsStore } from '@/stores/groups'
 
 const route = useRoute()
@@ -10,23 +10,41 @@ const groupsStore = useGroupsStore()
 // 旧形式（/groups/:id）または新形式（/:slug）のどちらか
 const isGroupPage = computed(() => {
   return route.path.startsWith('/groups/') ||
-    (route.params.groupSlug && !['my', 'inbox', 'flashcard', 'settings'].includes(route.params.groupSlug as string))
+    (route.params.groupSlug && !['my', 'inbox', 'flashcard', 'settings', 'timez'].includes(route.params.groupSlug as string))
 })
 const groupId = computed(() => route.params.groupId as string | undefined)
 const groupSlug = computed(() => route.params.groupSlug as string | undefined)
 
-// ナビゲーション用のベースパス
+// 最後にアクセスしたグループを記憶（グループメニューを開きっぱなしにするため）
+const lastGroupBasePath = ref<string | null>(null)
+
+watch([groupId, groupSlug], () => {
+  if (groupSlug.value) {
+    lastGroupBasePath.value = `/${groupSlug.value}`
+  } else if (groupId.value) {
+    lastGroupBasePath.value = `/groups/${groupId.value}`
+  }
+}, { immediate: true })
+
+// ナビゲーション用のベースパス（現在のグループ or 最後のグループ）
 const groupBasePath = computed(() => {
   if (groupSlug.value) {
     return `/${groupSlug.value}`
   }
-  return `/groups/${groupId.value}`
+  if (groupId.value) {
+    return `/groups/${groupId.value}`
+  }
+  return lastGroupBasePath.value
 })
 
-const mainNavItems = [
-  { path: '/', label: 'グループ一覧', icon: '📁' },
+// グループメニューを表示するか（グループにアクセスしたことがあれば表示し続ける）
+const showGroupMenu = computed(() => isGroupPage.value || lastGroupBasePath.value)
+
+// 個人メニュー
+const personalNavItems = [
   { path: '/my/tasks', label: 'マイタスク', icon: '📋' },
   { path: '/my/calendar', label: 'マイカレンダー', icon: '📅' },
+  { path: '/timez', label: 'Timez', icon: '💬' },
   { path: '/inbox', label: '受信トレイ', icon: '📥' },
   { path: '/flashcard', label: 'フラッシュカード', icon: '🎴' },
 ]
@@ -55,13 +73,14 @@ function isActive(item: { path: string; exact?: boolean }) {
 <template>
   <aside class="app-sidebar">
     <nav class="sidebar-nav">
-      <!-- メインナビ -->
+      <!-- 個人メニュー -->
       <div class="nav-section">
+        <div class="nav-section-title">個人</div>
         <div
-          v-for="item in mainNavItems"
+          v-for="item in personalNavItems"
           :key="item.path"
           class="nav-item"
-          :class="{ active: route.path === item.path }"
+          :class="{ active: route.path === item.path || route.path.startsWith(item.path + '/') }"
           @click="navigate(item.path)"
         >
           <span class="nav-icon">{{ item.icon }}</span>
@@ -69,8 +88,22 @@ function isActive(item: { path: string; exact?: boolean }) {
         </div>
       </div>
 
+      <div class="nav-divider"></div>
+
+      <!-- グループ一覧 -->
+      <div class="nav-section">
+        <div
+          class="nav-item"
+          :class="{ active: route.path === '/' }"
+          @click="navigate('/')"
+        >
+          <span class="nav-icon">📁</span>
+          <span class="nav-label">グループ一覧</span>
+        </div>
+      </div>
+
       <!-- グループ内ナビ -->
-      <template v-if="isGroupPage">
+      <template v-if="showGroupMenu && groupBasePath">
         <div class="nav-divider"></div>
         <div class="nav-section">
           <div class="nav-section-title">グループメニュー</div>

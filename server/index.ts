@@ -4,9 +4,13 @@ import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { usersRoutes } from './routes/users.js';
 import { groupsRoutes } from './routes/groups.js';
+import { jobInstancesRoutes } from './routes/job-instances.js';
+import { groupStatusesRoutes } from './routes/group-statuses.js';
 import { tasksRoutes } from './routes/tasks.js';
 import { jobDefinitionsRoutes } from './routes/job-definitions.js';
 import { browseRoutes } from './routes/browse.js';
+import { workflowRulesRoutes } from './routes/workflow-rules.js';
+import { timezRoutes } from './routes/timez.js';
 
 const app = new Hono();
 
@@ -34,9 +38,13 @@ app.get('/health', (c) => {
 // API ルート
 app.route('/api/users', usersRoutes);
 app.route('/api/groups', groupsRoutes);
+app.route('/api/groups', jobInstancesRoutes);
+app.route('/api/groups', groupStatusesRoutes);
 app.route('/api/tasks', tasksRoutes);
 app.route('/api/job-definitions', jobDefinitionsRoutes);
 app.route('/api/browse', browseRoutes);
+app.route('/api', workflowRulesRoutes);
+app.route('/api/timez', timezRoutes);
 
 // サーバー起動
 const PORT = parseInt(process.env.API_PORT || '3180');

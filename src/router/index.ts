@@ -30,6 +30,16 @@ const router = createRouter({
       component: () => import('@/views/FlashCard.vue'),
     },
     {
+      path: '/timez',
+      name: 'timez',
+      component: () => import('@/views/Timez.vue'),
+    },
+    {
+      path: '/timez/tag/:hashtag',
+      name: 'timez-tag',
+      component: () => import('@/views/Timez.vue'),
+    },
+    {
       path: '/settings',
       name: 'user-settings',
       component: () => import('@/views/UserSettings.vue'),

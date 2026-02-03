@@ -76,7 +76,7 @@ async function updateField(field: string, value: any) {
     const res = await fetch(`/api/tasks/${localTask.value.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ [field]: value }),
+      body: JSON.stringify({ [field]: value, updated_by: props.currentUserId }),
     })
     if (res.ok) {
       ;(localTask.value as any)[field] = value
@@ -101,7 +101,7 @@ async function updateStatus(status: string) {
     const res = await fetch(`/api/tasks/${localTask.value.id}/status`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status }),
+      body: JSON.stringify({ status, updated_by: props.currentUserId }),
     })
     if (res.ok) {
       localTask.value.status = status
@@ -281,6 +281,7 @@ async function toggleAssignee(memberId: string) {
       <TaskComments
         :task-id="localTask.id"
         :current-user-id="currentUserId"
+        :statuses="statuses"
       />
     </div>
   </div>

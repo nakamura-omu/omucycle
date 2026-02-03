@@ -7,6 +7,9 @@ import JobDefinitionEditModal from '@/components/job-definition/JobDefinitionEdi
 import TaskTemplateList from '@/components/job-definition/TaskTemplateList.vue'
 import TaskTemplateModal from '@/components/job-definition/TaskTemplateModal.vue'
 import InstantiateModal from '@/components/job-definition/InstantiateModal.vue'
+import WorkflowRuleList from '@/components/job-definition/WorkflowRuleList.vue'
+import WorkflowRuleModal from '@/components/job-definition/WorkflowRuleModal.vue'
+import type { WorkflowRule } from '@/components/job-definition/WorkflowRuleList.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -50,6 +53,13 @@ interface Member {
   role: string
 }
 
+interface GroupStatus {
+  id: string
+  key: string
+  label: string
+  color: string
+}
+
 interface JobDefinition {
   id: string
   group_id: string
@@ -67,15 +77,20 @@ interface JobDefinition {
 
 const job = ref<JobDefinition | null>(null)
 const members = ref<Member[]>([])
+const statuses = ref<GroupStatus[]>([])
 const isLoading = ref(true)
 
 // モーダル状態
 const showEditJobModal = ref(false)
 const showTemplateModal = ref(false)
 const showInstantiateModal = ref(false)
+const showRuleModal = ref(false)
 const templateModalMode = ref<'add' | 'edit'>('add')
+const ruleModalMode = ref<'add' | 'edit'>('add')
 const editingTemplate = ref<TaskTemplate | null>(null)
+const editingRule = ref<WorkflowRule | null>(null)
 const parentTemplateId = ref<string>('')
+const ruleListRef = ref<InstanceType<typeof WorkflowRuleList> | null>(null)
 
 const monthNames = [
   '1月', '2月', '3月', '4月', '5月', '6月',
@@ -114,6 +129,18 @@ async function fetchMembers() {
     }
   } catch (error) {
     console.error('Failed to fetch members:', error)
+  }
+}
+
+async function fetchStatuses() {
+  if (!resolvedGroupId.value) return
+  try {
+    const res = await fetch(`/api/groups/${resolvedGroupId.value}/statuses`)
+    if (res.ok) {
+      statuses.value = await res.json()
+    }
+  } catch (error) {
+    console.error('Failed to fetch statuses:', error)
   }
 }
 
@@ -156,6 +183,22 @@ function openEditTemplateModal(template: TaskTemplate) {
   showTemplateModal.value = true
 }
 
+function openAddRuleModal() {
+  ruleModalMode.value = 'add'
+  editingRule.value = null
+  showRuleModal.value = true
+}
+
+function openEditRuleModal(rule: WorkflowRule) {
+  ruleModalMode.value = 'edit'
+  editingRule.value = rule
+  showRuleModal.value = true
+}
+
+function handleRuleSaved() {
+  ruleListRef.value?.fetchRules()
+}
+
 function handleInstanceCreated(instance: { id: string; task_count: number }) {
   alert(`${instance.task_count}件のタスクが作成されました`)
   if (resolvedGroupSlug.value) {
@@ -165,10 +208,11 @@ function handleInstanceCreated(instance: { id: string; task_count: number }) {
   }
 }
 
-// jobが取得されたらmembersを取得
+// jobが取得されたらmembersとstatusesを取得
 watch(job, (newJob) => {
   if (newJob) {
     fetchMembers()
+    fetchStatuses()
   }
 })
 
@@ -240,6 +284,16 @@ onMounted(() => {
         </div>
       </div>
 
+      <!-- ワークフロールール -->
+      <WorkflowRuleList
+        ref="ruleListRef"
+        :job-id="jobId"
+        :statuses="statuses"
+        :members="members"
+        @add="openAddRuleModal"
+        @edit="openEditRuleModal"
+      />
+
       <!-- タスク一覧 -->
       <TaskTemplateList
         :templates="job.templates"
@@ -279,6 +333,17 @@ onMounted(() => {
       :template-count="job.templates.length"
       :current-user-id="userStore.currentUser.id"
       @created="handleInstanceCreated"
+    />
+
+    <!-- ワークフロールールモーダル -->
+    <WorkflowRuleModal
+      v-model="showRuleModal"
+      :mode="ruleModalMode"
+      :job-id="jobId"
+      :rule="editingRule"
+      :statuses="statuses"
+      :members="members"
+      @saved="handleRuleSaved"
     />
   </div>
 </template>

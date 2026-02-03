@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, computed } from 'vue'
+import { onMounted, computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTasksStore } from '@/stores/tasks'
 
@@ -8,6 +8,22 @@ const router = useRouter()
 const tasksStore = useTasksStore()
 
 const groupId = computed(() => route.params.groupId as string)
+
+interface HistoryEntry {
+  id: string
+  task_id: string
+  user_name: string
+  task_title: string
+  task_number: number | null
+  action_type: string
+  field_name: string | null
+  old_value: string | null
+  new_value: string | null
+  created_at: string
+}
+
+const history = ref<HistoryEntry[]>([])
+const isLoadingHistory = ref(false)
 
 const urgentTasks = computed(() =>
   tasksStore.tasks
@@ -22,8 +38,52 @@ const upcomingTasks = computed(() =>
     .slice(0, 5)
 )
 
+async function fetchHistory() {
+  isLoadingHistory.value = true
+  try {
+    const res = await fetch(`/api/groups/${groupId.value}/history?limit=10`)
+    if (res.ok) {
+      history.value = await res.json()
+    }
+  } catch (error) {
+    console.error('Failed to fetch history:', error)
+  } finally {
+    isLoadingHistory.value = false
+  }
+}
+
+function getFieldLabel(field: string): string {
+  const labels: Record<string, string> = {
+    status: 'ステータス',
+    priority: '優先度',
+    title: 'タイトル',
+    description: '説明',
+    assignee_id: '担当者',
+    assignee_ids: '担当者',
+    start_date: '開始日',
+    due_date: '期限日',
+  }
+  return labels[field] || field
+}
+
+function formatHistoryTime(dateStr: string): string {
+  const date = new Date(dateStr)
+  const now = new Date()
+  const diffMs = now.getTime() - date.getTime()
+  const diffMins = Math.floor(diffMs / 60000)
+  const diffHours = Math.floor(diffMs / 3600000)
+  const diffDays = Math.floor(diffMs / 86400000)
+
+  if (diffMins < 1) return 'たった今'
+  if (diffMins < 60) return `${diffMins}分前`
+  if (diffHours < 24) return `${diffHours}時間前`
+  if (diffDays < 7) return `${diffDays}日前`
+  return date.toLocaleDateString('ja-JP')
+}
+
 onMounted(() => {
   tasksStore.fetchGroupTasks(groupId.value)
+  fetchHistory()
 })
 
 function goToTask(taskId: string) {
@@ -107,6 +167,43 @@ const priorityColors: Record<string, string> = {
             <span class="stat-value">{{ tasksStore.tasksByStatus.completed.length }}</span>
             <span class="stat-label">完了</span>
           </div>
+        </div>
+      </div>
+
+      <!-- 最近の履歴 -->
+      <div class="dashboard-card history-card">
+        <h3>📝 最近の履歴</h3>
+        <div v-if="isLoadingHistory" class="empty-state">読み込み中...</div>
+        <div v-else-if="history.length === 0" class="empty-state">
+          履歴はありません
+        </div>
+        <div v-else class="history-list">
+          <div
+            v-for="entry in history"
+            :key="entry.id"
+            class="history-item"
+          >
+            <div class="history-main">
+              <span class="history-user">{{ entry.user_name }}</span>
+              が
+              <span class="history-task" @click="goToTask(entry.task_id)">
+                #{{ entry.task_number || '-' }} {{ entry.task_title }}
+              </span>
+              の
+              <span class="history-field">{{ getFieldLabel(entry.field_name || '') }}</span>
+              を変更
+            </div>
+            <div class="history-time">{{ formatHistoryTime(entry.created_at) }}</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ファイル -->
+      <div class="dashboard-card files-card">
+        <h3>📁 ファイル</h3>
+        <div class="coming-soon">
+          <span class="coming-soon-icon">🚧</span>
+          <span>Coming Soon</span>
         </div>
       </div>
     </div>
@@ -207,5 +304,64 @@ const priorityColors: Record<string, string> = {
 .stat-label {
   font-size: 0.75rem;
   color: #666;
+}
+
+/* 履歴 */
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.history-item {
+  padding: 0.5rem 0.625rem;
+  background: #fefce8;
+  border-radius: 6px;
+  border-left: 3px solid #facc15;
+}
+
+.history-main {
+  font-size: 0.8125rem;
+  color: #666;
+  line-height: 1.5;
+}
+
+.history-user {
+  font-weight: 600;
+  color: #1a1a2e;
+}
+
+.history-task {
+  color: #4338ca;
+  cursor: pointer;
+}
+
+.history-task:hover {
+  text-decoration: underline;
+}
+
+.history-field {
+  color: #059669;
+}
+
+.history-time {
+  font-size: 0.7rem;
+  color: #999;
+  margin-top: 0.25rem;
+}
+
+/* Coming Soon */
+.coming-soon {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  color: #999;
+  gap: 0.5rem;
+}
+
+.coming-soon-icon {
+  font-size: 2rem;
 }
 </style>
