@@ -2,6 +2,12 @@
 import { ref, computed, onMounted } from 'vue'
 import { useUserStore } from '@/stores/user'
 import { useRouter } from 'vue-router'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import PageContainer from '@/components/layout/PageContainer.vue'
+import { api } from '@/lib/api'
 
 const userStore = useUserStore()
 const router = useRouter()
@@ -13,14 +19,12 @@ const editForm = ref({
 })
 const isSaving = ref(false)
 
-// ユーザーのイニシャル（アバター用）
 const userInitial = computed(() => {
   const name = isEditing.value ? editForm.value.name : userStore.currentUser?.name
   if (!name) return '?'
   return name.charAt(0).toUpperCase()
 })
 
-// アバターの背景色（名前からハッシュ生成）
 const avatarColor = computed(() => {
   const name = isEditing.value ? editForm.value.name : userStore.currentUser?.name
   if (!name) return '#666'
@@ -66,7 +70,7 @@ async function saveChanges() {
 
   isSaving.value = true
   try {
-    const res = await fetch(`/api/users/${userStore.currentUser.id}`, {
+    const res = await api(`/api/users/${userStore.currentUser.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -96,278 +100,100 @@ function goBack() {
 </script>
 
 <template>
-  <div class="settings-page">
-    <div class="page-header">
-      <button class="back-btn" @click="goBack">← 戻る</button>
-      <h1>アカウント設定</h1>
+  <PageContainer narrow>
+    <div class="mb-6">
+      <Button variant="ghost" size="sm" class="mb-2 text-muted-foreground" @click="goBack">
+        ← 戻る
+      </Button>
+      <h1 class="text-2xl font-bold text-foreground">アカウント設定</h1>
     </div>
 
-    <div class="settings-content" v-if="userStore.currentUser">
+    <div v-if="userStore.currentUser" class="flex flex-col gap-6">
       <!-- プロフィールセクション -->
-      <section class="settings-section">
-        <div class="section-header">
-          <h2>プロフィール</h2>
-          <button v-if="!isEditing" class="btn btn-secondary" @click="startEdit">
+      <Card>
+        <CardHeader class="flex flex-row items-center justify-between space-y-0 pb-4">
+          <CardTitle class="text-base">プロフィール</CardTitle>
+          <Button v-if="!isEditing" variant="secondary" size="sm" @click="startEdit">
             編集
-          </button>
-        </div>
+          </Button>
+        </CardHeader>
+        <CardContent>
+          <div class="flex gap-6 items-start">
+            <div
+              class="w-20 h-20 rounded-full flex items-center justify-center font-semibold text-3xl text-white shrink-0"
+              :style="{ background: avatarColor }"
+            >
+              {{ userInitial }}
+            </div>
 
-        <div class="profile-card">
-          <div class="profile-avatar" :style="{ background: avatarColor }">
-            {{ userInitial }}
+            <div class="flex-1 flex flex-col gap-4">
+              <div class="space-y-1">
+                <Label class="text-xs uppercase text-muted-foreground">名前</Label>
+                <Input
+                  v-if="isEditing"
+                  v-model="editForm.name"
+                  type="text"
+                  placeholder="名前を入力"
+                />
+                <span v-else class="text-sm text-foreground">{{ userStore.currentUser.name }}</span>
+              </div>
+
+              <div class="space-y-1">
+                <Label class="text-xs uppercase text-muted-foreground">メールアドレス</Label>
+                <span class="text-sm text-muted-foreground">{{ userStore.currentUser.email }}</span>
+                <span v-if="isEditing" class="text-xs text-muted-foreground block">メールアドレスは変更できません</span>
+              </div>
+
+              <div class="space-y-1">
+                <Label class="text-xs uppercase text-muted-foreground">認証タイプ</Label>
+                <span class="text-sm text-muted-foreground">
+                  {{ userStore.currentUser.auth_type === 'sso' ? 'SSO (Entra ID)' : 'ゲスト' }}
+                </span>
+              </div>
+            </div>
           </div>
 
-          <div class="profile-info">
-            <div class="form-group">
-              <label>名前</label>
-              <input
-                v-if="isEditing"
-                v-model="editForm.name"
-                type="text"
-                placeholder="名前を入力"
-              />
-              <span v-else class="info-value">{{ userStore.currentUser.name }}</span>
-            </div>
-
-            <div class="form-group">
-              <label>メールアドレス</label>
-              <span class="info-value readonly">{{ userStore.currentUser.email }}</span>
-              <span v-if="isEditing" class="help-text">メールアドレスは変更できません</span>
-            </div>
-
-            <div class="form-group">
-              <label>認証タイプ</label>
-              <span class="info-value readonly">
-                {{ userStore.currentUser.auth_type === 'sso' ? 'SSO (Entra ID)' : 'ゲスト' }}
-              </span>
-            </div>
+          <div v-if="isEditing" class="flex justify-end gap-2 mt-4 pt-4 border-t border-border">
+            <Button variant="secondary" size="sm" @click="cancelEdit" :disabled="isSaving">
+              キャンセル
+            </Button>
+            <Button size="sm" @click="saveChanges" :disabled="isSaving">
+              {{ isSaving ? '保存中...' : '保存' }}
+            </Button>
           </div>
-        </div>
-
-        <div v-if="isEditing" class="edit-actions">
-          <button class="btn btn-secondary" @click="cancelEdit" :disabled="isSaving">
-            キャンセル
-          </button>
-          <button class="btn btn-primary" @click="saveChanges" :disabled="isSaving">
-            {{ isSaving ? '保存中...' : '保存' }}
-          </button>
-        </div>
-      </section>
+        </CardContent>
+      </Card>
 
       <!-- アバターカラープレビュー -->
-      <section class="settings-section">
-        <h2>アバタープレビュー</h2>
-        <p class="section-description">
-          アバターの色は名前から自動生成されます。名前を変更すると色が変わることがあります。
-        </p>
-        <div class="avatar-preview">
-          <div class="preview-avatar" :style="{ background: avatarColor }">
-            {{ userInitial }}
+      <Card>
+        <CardHeader>
+          <CardTitle class="text-base">アバタープレビュー</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p class="text-sm text-muted-foreground mb-4">
+            アバターの色は名前から自動生成されます。名前を変更すると色が変わることがあります。
+          </p>
+          <div class="flex items-center gap-4 p-4 bg-muted rounded-lg">
+            <div
+              class="w-12 h-12 rounded-full flex items-center justify-center font-semibold text-xl text-white"
+              :style="{ background: avatarColor }"
+            >
+              {{ userInitial }}
+            </div>
+            <span class="text-sm text-foreground">{{ isEditing ? editForm.name : userStore.currentUser.name }}</span>
           </div>
-          <span class="preview-name">{{ isEditing ? editForm.name : userStore.currentUser.name }}</span>
-        </div>
-      </section>
+        </CardContent>
+      </Card>
 
-      <!-- その他の設定（将来用） -->
-      <section class="settings-section">
-        <h2>通知設定</h2>
-        <p class="coming-soon">Coming Soon - 通知設定は今後実装予定です</p>
-      </section>
+      <!-- その他の設定 -->
+      <Card>
+        <CardHeader>
+          <CardTitle class="text-base">通知設定</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p class="text-sm italic text-muted-foreground">Coming Soon - 通知設定は今後実装予定です</p>
+        </CardContent>
+      </Card>
     </div>
-  </div>
+  </PageContainer>
 </template>
-
-<style scoped>
-.settings-page {
-  max-width: 600px;
-  margin: 0 auto;
-  padding: 0 1rem;
-}
-
-.page-header {
-  margin-bottom: 1.5rem;
-}
-
-.back-btn {
-  background: none;
-  border: none;
-  color: #666;
-  cursor: pointer;
-  font-size: 0.875rem;
-  padding: 0;
-  margin-bottom: 0.5rem;
-}
-
-.back-btn:hover {
-  color: #1a1a2e;
-}
-
-.page-header h1 {
-  font-size: 1.5rem;
-  color: #1a1a2e;
-  margin: 0;
-}
-
-.settings-content {
-  display: flex;
-  flex-direction: column;
-  gap: 1.5rem;
-}
-
-.settings-section {
-  background: white;
-  border-radius: 12px;
-  padding: 1.5rem;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-}
-
-.section-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 1rem;
-}
-
-.settings-section h2 {
-  font-size: 1rem;
-  color: #1a1a2e;
-  margin: 0;
-}
-
-.section-description {
-  font-size: 0.875rem;
-  color: #666;
-  margin: 0 0 1rem 0;
-}
-
-.profile-card {
-  display: flex;
-  gap: 1.5rem;
-  align-items: flex-start;
-}
-
-.profile-avatar {
-  width: 80px;
-  height: 80px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 600;
-  font-size: 2rem;
-  color: white;
-  flex-shrink: 0;
-}
-
-.profile-info {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-
-.form-group {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-
-.form-group label {
-  font-size: 0.75rem;
-  font-weight: 500;
-  color: #666;
-  text-transform: uppercase;
-}
-
-.form-group input {
-  padding: 0.625rem;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  font-size: 0.9375rem;
-}
-
-.form-group input:focus {
-  outline: none;
-  border-color: #4cc9f0;
-}
-
-.info-value {
-  font-size: 0.9375rem;
-  color: #1a1a2e;
-}
-
-.info-value.readonly {
-  color: #666;
-}
-
-.help-text {
-  font-size: 0.75rem;
-  color: #999;
-}
-
-.edit-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 0.5rem;
-  margin-top: 1rem;
-  padding-top: 1rem;
-  border-top: 1px solid #eee;
-}
-
-.avatar-preview {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  padding: 1rem;
-  background: #f8f9fa;
-  border-radius: 8px;
-}
-
-.preview-avatar {
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 600;
-  font-size: 1.25rem;
-  color: white;
-}
-
-.preview-name {
-  font-size: 0.9375rem;
-  color: #1a1a2e;
-}
-
-.coming-soon {
-  color: #999;
-  font-style: italic;
-  margin: 0;
-}
-
-/* ボタン */
-.btn {
-  padding: 0.5rem 1rem;
-  border-radius: 6px;
-  font-size: 0.875rem;
-  font-weight: 500;
-  cursor: pointer;
-  border: none;
-}
-
-.btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.btn-primary {
-  background: #4cc9f0;
-  color: #1a1a2e;
-}
-
-.btn-secondary {
-  background: #e0e0e0;
-  color: #333;
-}
-</style>

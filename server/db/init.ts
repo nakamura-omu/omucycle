@@ -1,318 +1,78 @@
 import Database from 'better-sqlite3';
 import { schema } from './schema.js';
-import { v4 as uuidv4 } from 'uuid';
+import { seedDemo } from './seed.js';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dbPath = path.join(__dirname, '../../data/omucycle.db');
 
-// データディレクトリを作成
-import fs from 'fs';
 const dataDir = path.dirname(dbPath);
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
+}
+
+const isReset = process.argv.includes('--reset');
+
+if (isReset && fs.existsSync(dbPath)) {
+  console.log('Removing existing database...');
+  for (const ext of ['', '-wal', '-shm']) {
+    const p = dbPath + ext;
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+  }
 }
 
 const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
-console.log('Initializing database...');
+// 移行: 旧 atlas_relations を破棄（汎用 atlas_links に置換）
+const oldAtlasRel = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='atlas_relations'").get();
+if (oldAtlasRel) {
+  console.log('Migrating: dropping old atlas_relations table...');
+  db.exec('DROP TABLE atlas_relations');
+}
 
-// スキーマを実行
+// 旧 sticky 機能（ProjectAtlas に統合）テーブルを削除
+for (const t of ['sticky_relations', 'sticky_notes', 'sticky_groups', 'sticky_boards']) {
+  const exists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(t);
+  if (exists) {
+    console.log(`Dropping legacy table: ${t}`);
+    db.exec(`DROP TABLE ${t}`);
+  }
+}
+
+console.log('Applying schema...');
 db.exec(schema);
 
-console.log('Schema created successfully.');
-
-// === マイグレーション ===
-console.log('Running migrations...');
-
-// 1. tasksテーブルのstatus CHECK制約を削除 & assignee_ids追加
-const tasksTableInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'").get() as { sql: string } | undefined;
-if (tasksTableInfo && tasksTableInfo.sql.includes("CHECK(status IN ('not_started', 'in_progress', 'completed'))")) {
-  console.log('Migrating tasks table: removing status CHECK constraint...');
-
-  // バックアップテーブルを作成
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS tasks_new (
-      id TEXT PRIMARY KEY,
-      job_instance_id TEXT REFERENCES job_instances(id) ON DELETE SET NULL,
-      group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
-      task_template_id TEXT REFERENCES task_templates(id) ON DELETE SET NULL,
-      parent_task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
-      task_number INTEGER,
-      depth INTEGER DEFAULT 0 CHECK(depth BETWEEN 0 AND 2),
-      title TEXT NOT NULL,
-      description TEXT,
-      start_date TEXT,
-      due_date TEXT,
-      status TEXT DEFAULT 'not_started',
-      priority TEXT CHECK(priority IN ('urgent', 'important', 'normal', 'none')) DEFAULT 'normal',
-      assignee_id TEXT REFERENCES users(id) ON DELETE SET NULL,
-      assignee_ids TEXT,
-      created_by TEXT NOT NULL REFERENCES users(id),
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
-    );
-  `);
-
-  // データをコピー
-  db.exec(`
-    INSERT INTO tasks_new (id, job_instance_id, group_id, task_template_id, parent_task_id, task_number, depth, title, description, start_date, due_date, status, priority, assignee_id, created_by, created_at, updated_at)
-    SELECT id, job_instance_id, group_id, task_template_id, parent_task_id, task_number, depth, title, description, start_date, due_date, status, priority, assignee_id, created_by, created_at, updated_at
-    FROM tasks;
-  `);
-
-  // 古いテーブルを削除して新しいテーブルをリネーム
-  db.exec('DROP TABLE tasks;');
-  db.exec('ALTER TABLE tasks_new RENAME TO tasks;');
-
-  // インデックスを再作成
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_task_group_id ON tasks(group_id);
-    CREATE INDEX IF NOT EXISTS idx_task_assignee_id ON tasks(assignee_id);
-    CREATE INDEX IF NOT EXISTS idx_task_due_date ON tasks(due_date);
-    CREATE INDEX IF NOT EXISTS idx_task_status ON tasks(status);
-    CREATE INDEX IF NOT EXISTS idx_task_parent_id ON tasks(parent_task_id);
-  `);
-
-  console.log('Tasks table migrated successfully.');
-} else {
-  // assignee_ids列がなければ追加
-  const columns = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
-  if (!columns.find(c => c.name === 'assignee_ids')) {
-    console.log('Adding assignee_ids column to tasks table...');
-    db.exec('ALTER TABLE tasks ADD COLUMN assignee_ids TEXT;');
-    console.log('assignee_ids column added.');
+// project_id カラム追加（既存テーブル）
+function ensureColumn(table: string, column: string, def: string) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as any[];
+  if (cols.length > 0 && !cols.find(c => c.name === column)) {
+    console.log(`Adding ${column} to ${table}...`);
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
   }
 }
+ensureColumn('atlas_annotations', 'project_id', 'TEXT');
+ensureColumn('atlas_links', 'project_id', 'TEXT');
+ensureColumn('atlas_layout', 'project_id', 'TEXT');
+ensureColumn('tasks', 'is_section', 'INTEGER DEFAULT 0');
+ensureColumn('tasks', 'atlas_layout_mode', "TEXT DEFAULT 'free'");
+ensureColumn('tasks', 'atlas_columns', 'INTEGER DEFAULT 2');
 
-// 2. task_templatesにrelative_days列を追加
-const ttColumns = db.prepare("PRAGMA table_info(task_templates)").all() as { name: string }[];
-if (!ttColumns.find(c => c.name === 'relative_days')) {
-  console.log('Adding relative_days column to task_templates table...');
-  db.exec('ALTER TABLE task_templates ADD COLUMN relative_days INTEGER DEFAULT 0;');
-  console.log('relative_days column added.');
+// atlas_layout に 'section' として登録されている既存タスクを is_section=1 に
+const sectionLayoutNodes = db.prepare(`
+  SELECT DISTINCT node_id FROM atlas_layout WHERE node_type = 'section'
+`).all() as { node_id: string }[];
+if (sectionLayoutNodes.length > 0) {
+  const upd = db.prepare('UPDATE tasks SET is_section = 1 WHERE id = ? AND is_section = 0');
+  for (const n of sectionLayoutNodes) upd.run(n.node_id);
+  console.log(`Marked ${sectionLayoutNodes.length} tasks as is_section based on atlas_layout`);
 }
 
-// 3. job_instancesにname列を追加
-const jiColumns = db.prepare("PRAGMA table_info(job_instances)").all() as { name: string }[];
-if (!jiColumns.find(c => c.name === 'name')) {
-  console.log('Adding name column to job_instances table...');
-  db.exec('ALTER TABLE job_instances ADD COLUMN name TEXT;');
-  console.log('name column added.');
-}
-
-// 4. 既存グループにデフォルトステータスを追加
-const groupsWithoutStatuses = db.prepare(`
-  SELECT g.id FROM groups g
-  WHERE NOT EXISTS (
-    SELECT 1 FROM group_statuses gs WHERE gs.group_id = g.id
-  )
-`).all() as { id: string }[];
-
-if (groupsWithoutStatuses.length > 0) {
-  console.log(`Adding default statuses to ${groupsWithoutStatuses.length} groups...`);
-  const insertStatus = db.prepare(`
-    INSERT INTO group_statuses (id, group_id, key, label, color, sort_order, is_done)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  const defaultStatuses = [
-    { key: 'not_started', label: '未着手', color: '#94a3b8', sort_order: 0, is_done: 0 },
-    { key: 'in_progress', label: '進行中', color: '#3b82f6', sort_order: 1, is_done: 0 },
-    { key: 'completed', label: '完了', color: '#22c55e', sort_order: 2, is_done: 1 },
-  ];
-
-  for (const group of groupsWithoutStatuses) {
-    for (const status of defaultStatuses) {
-      insertStatus.run(uuidv4(), group.id, status.key, status.label, status.color, status.sort_order, status.is_done);
-    }
-  }
-  console.log('Default statuses added.');
-}
-
-// 5. tasksにsort_order列を追加
-const taskColumns = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
-if (!taskColumns.find(c => c.name === 'sort_order')) {
-  console.log('Adding sort_order column to tasks table...');
-  db.exec('ALTER TABLE tasks ADD COLUMN sort_order INTEGER DEFAULT 0;');
-  console.log('sort_order column added.');
-}
-
-// 6. job_definitionsに利用回数・前回開始日・更新者情報を追加
-const jdColumns = db.prepare("PRAGMA table_info(job_definitions)").all() as { name: string }[];
-if (!jdColumns.find(c => c.name === 'usage_count')) {
-  console.log('Adding usage_count, last_used_at, updated_by columns to job_definitions table...');
-  db.exec('ALTER TABLE job_definitions ADD COLUMN usage_count INTEGER DEFAULT 0;');
-  db.exec('ALTER TABLE job_definitions ADD COLUMN last_used_at TEXT;');
-  db.exec('ALTER TABLE job_definitions ADD COLUMN updated_by TEXT REFERENCES users(id) ON DELETE SET NULL;');
-  console.log('job_definitions columns added.');
-}
-
-// 7. workflow_rulesテーブルの確認（スキーマで作成済みのはず）
-const wrTableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='workflow_rules'").get();
-if (wrTableExists) {
-  console.log('workflow_rules table exists.');
-} else {
-  console.log('Creating workflow_rules table...');
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS workflow_rules (
-      id TEXT PRIMARY KEY,
-      job_definition_id TEXT NOT NULL REFERENCES job_definitions(id) ON DELETE CASCADE,
-      name TEXT NOT NULL,
-      trigger_type TEXT NOT NULL,
-      trigger_config TEXT,
-      action_type TEXT NOT NULL,
-      action_config TEXT,
-      is_active INTEGER DEFAULT 1,
-      sort_order INTEGER DEFAULT 0,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
-    );
-  `);
-  console.log('workflow_rules table created.');
-}
-
-// 8. timez_postsテーブルの確認
-const timezPostsExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='timez_posts'").get();
-if (!timezPostsExists) {
-  console.log('Creating timez tables...');
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS timez_posts (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      content TEXT NOT NULL,
-      hashtags TEXT,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS timez_comments (
-      id TEXT PRIMARY KEY,
-      post_id TEXT NOT NULL REFERENCES timez_posts(id) ON DELETE CASCADE,
-      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      content TEXT NOT NULL,
-      created_at TEXT DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS timez_hashtags (
-      id TEXT PRIMARY KEY,
-      post_id TEXT NOT NULL REFERENCES timez_posts(id) ON DELETE CASCADE,
-      hashtag TEXT NOT NULL,
-      created_at TEXT DEFAULT (datetime('now'))
-    );
-    CREATE INDEX IF NOT EXISTS idx_timez_posts_user_id ON timez_posts(user_id);
-    CREATE INDEX IF NOT EXISTS idx_timez_posts_created_at ON timez_posts(created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_timez_comments_post_id ON timez_comments(post_id);
-    CREATE INDEX IF NOT EXISTS idx_timez_hashtags_hashtag ON timez_hashtags(hashtag);
-    CREATE INDEX IF NOT EXISTS idx_timez_hashtags_created_at ON timez_hashtags(created_at DESC);
-  `);
-  console.log('timez tables created.');
-} else {
-  console.log('timez tables exist.');
-}
-
-// 9. task_historyテーブルの確認
-const taskHistoryExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='task_history'").get();
-if (!taskHistoryExists) {
-  console.log('Creating task_history table...');
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS task_history (
-      id TEXT PRIMARY KEY,
-      task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-      user_id TEXT NOT NULL REFERENCES users(id),
-      action_type TEXT NOT NULL,
-      field_name TEXT,
-      old_value TEXT,
-      new_value TEXT,
-      created_at TEXT DEFAULT (datetime('now'))
-    );
-    CREATE INDEX IF NOT EXISTS idx_task_history_task_id ON task_history(task_id);
-    CREATE INDEX IF NOT EXISTS idx_task_history_created_at ON task_history(created_at DESC);
-  `);
-  console.log('task_history table created.');
-} else {
-  console.log('task_history table exists.');
-}
-
-console.log('Migrations complete.');
-
-// デモ用の初期データを挿入
-const demoUserId = uuidv4();
-const demoGroupId = uuidv4();
-
-const existingUser = db.prepare('SELECT id FROM users WHERE email = ?').get('demo@example.com');
-
-if (!existingUser) {
-  console.log('Inserting demo data...');
-
-  // デモユーザー
-  db.prepare(`
-    INSERT INTO users (id, email, name, auth_type)
-    VALUES (?, ?, ?, ?)
-  `).run(demoUserId, 'demo@example.com', 'デモユーザー', 'guest');
-
-  // デモグループ
-  db.prepare(`
-    INSERT INTO groups (id, name, created_by)
-    VALUES (?, ?, ?)
-  `).run(demoGroupId, 'DX推進課', demoUserId);
-
-  // メンバーシップ
-  db.prepare(`
-    INSERT INTO group_memberships (id, group_id, user_id, role)
-    VALUES (?, ?, ?, ?)
-  `).run(uuidv4(), demoGroupId, demoUserId, 'owner');
-
-  // デモ業務定義
-  const jobDefId = uuidv4();
-  db.prepare(`
-    INSERT INTO job_definitions (id, group_id, name, category, typical_start_month, typical_duration_days, description)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(jobDefId, demoGroupId, '入学式準備', '式典系', 3, 30, '入学式の準備業務。式次第作成から当日運営まで。');
-
-  // デモタスクテンプレート
-  const taskTemplateId = uuidv4();
-  db.prepare(`
-    INSERT INTO task_templates (id, job_definition_id, depth, title, description)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(taskTemplateId, jobDefId, 0, '式次第作成', '入学式の式次第を作成');
-
-  db.prepare(`
-    INSERT INTO task_templates (id, job_definition_id, parent_template_id, depth, title, description)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(uuidv4(), jobDefId, taskTemplateId, 1, '来賓リスト確認', '来賓の出席確認と挨拶順序の決定');
-
-  // 年度業務インスタンス
-  const jobInstanceId = uuidv4();
-  db.prepare(`
-    INSERT INTO job_instances (id, job_definition_id, group_id, fiscal_year, status, actual_start)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(jobInstanceId, jobDefId, demoGroupId, 2025, 'in_progress', '2025-03-01');
-
-  // デモタスク
-  const taskId = uuidv4();
-  db.prepare(`
-    INSERT INTO tasks (id, job_instance_id, group_id, depth, title, description, start_date, due_date, status, priority, assignee_id, created_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(taskId, jobInstanceId, demoGroupId, 0, '式次第作成', '入学式の式次第を作成する。昨年度のものをベースに変更点を反映。', '2025-03-01', '2025-03-20', 'not_started', 'urgent', demoUserId, demoUserId);
-
-  db.prepare(`
-    INSERT INTO tasks (id, job_instance_id, group_id, parent_task_id, depth, title, description, start_date, due_date, status, priority, assignee_id, created_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(uuidv4(), jobInstanceId, demoGroupId, taskId, 1, '来賓挨拶順確認', '来賓の挨拶順序を確認する', '2025-03-05', '2025-03-15', 'not_started', 'important', demoUserId, demoUserId);
-
-  // デモコメント
-  db.prepare(`
-    INSERT INTO task_comments (id, task_id, user_id, content)
-    VALUES (?, ?, ?, ?)
-  `).run(uuidv4(), taskId, demoUserId, '昨年度の式次第を参考に作成開始します。');
-
-  console.log('Demo data inserted successfully.');
-} else {
-  console.log('Demo data already exists, skipping...');
-}
+console.log('Seeding demo data...');
+seedDemo(db);
 
 db.close();
-console.log('Database initialization complete!');
-console.log(`Database location: ${dbPath}`);
+console.log(`Database initialization complete: ${dbPath}`);

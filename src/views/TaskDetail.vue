@@ -1,581 +1,422 @@
 <script setup lang="ts">
 import { onMounted, ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useTasksStore, type Task } from '@/stores/tasks'
+import { api } from '@/lib/api'
 import { useGroupsStore } from '@/stores/groups'
+import { useProjectsStore } from '@/stores/projects'
+import { useTasksStore, type Task } from '@/stores/tasks'
 import { useUserStore } from '@/stores/user'
+import PageContainer from '@/components/layout/PageContainer.vue'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 
 const route = useRoute()
 const router = useRouter()
-const tasksStore = useTasksStore()
 const groupsStore = useGroupsStore()
+const projectsStore = useProjectsStore()
+const tasksStore = useTasksStore()
 const userStore = useUserStore()
 
-// 旧形式または新形式のパラメータ
-const taskId = computed(() => route.params.taskId as string | undefined)
-const groupId = computed(() => route.params.groupId as string | undefined)
-const groupSlug = computed(() => route.params.groupSlug as string | undefined)
-const instanceKey = computed(() => route.params.instanceKey as string | undefined)
-const taskNumber = computed(() => route.params.taskNumber as string | undefined)
+const groupSlug = computed(() => route.params.groupSlug as string)
+const projectSlug = computed(() => route.params.projectSlug as string)
+const taskNumber = computed(() => parseInt(route.params.taskNumber as string, 10))
 
-const resolvedGroupId = computed(() => {
-  if (groupId.value) return groupId.value
-  return groupsStore.currentGroup?.id || ''
+const titleEdit = ref('')
+const descEdit = ref('')
+
+const showAssignees = ref(false)
+const newLabel = ref('')
+const newSubtaskTitle = ref('')
+
+async function load() {
+  if (!groupsStore.currentGroup || groupsStore.currentGroup.slug !== groupSlug.value) {
+    await groupsStore.fetchGroupBySlug(groupSlug.value)
+  }
+  if (groupsStore.currentGroup?.id) {
+    await groupsStore.fetchMembers(groupsStore.currentGroup.id)
+  }
+  if (!projectsStore.currentProject || projectsStore.currentProject.slug !== projectSlug.value) {
+    await projectsStore.fetchProjectBySlug(groupSlug.value, projectSlug.value)
+    if (projectsStore.currentProject) {
+      await projectsStore.fetchCycles(projectsStore.currentProject.id)
+    }
+  }
+  const res = await api(`/api/browse/${groupSlug.value}/projects/${projectSlug.value}/tasks/${taskNumber.value}`)
+  if (!res.ok) return
+  const t = await res.json()
+  await Promise.all([
+    tasksStore.fetchTask(t.id),
+    tasksStore.fetchComments(t.id),
+  ])
+  titleEdit.value = tasksStore.currentTask?.title || ''
+  descEdit.value = tasksStore.currentTask?.description || ''
+}
+
+onMounted(load)
+watch([groupSlug, projectSlug, taskNumber], load)
+
+const task = computed(() => tasksStore.currentTask)
+
+const assigneeIds = computed<string[]>(() => {
+  if (!task.value) return []
+  if (Array.isArray(task.value.assignee_ids)) return task.value.assignee_ids as string[]
+  if (typeof task.value.assignee_ids === 'string') {
+    try { return JSON.parse(task.value.assignee_ids) } catch { return [] }
+  }
+  return task.value.assignee_id ? [task.value.assignee_id] : []
 })
 
+const assigneeNames = computed(() => assigneeIds.value
+  .map(id => groupsStore.members.find(m => m.id === id)?.name)
+  .filter(Boolean) as string[]
+)
+
+const labels = computed<string[]>(() => {
+  if (!task.value) return []
+  if (Array.isArray(task.value.labels)) return task.value.labels as string[]
+  if (typeof task.value.labels === 'string') {
+    try { return JSON.parse(task.value.labels) } catch { return [] }
+  }
+  return []
+})
+
+const isDone = computed(() => task.value?.status === 'completed')
+
+async function toggleDone() {
+  if (!task.value || !userStore.currentUser?.id) return
+  const next = isDone.value ? 'not_started' : 'completed'
+  await tasksStore.updateStatus(task.value.id, next, userStore.currentUser.id)
+}
+
+async function toggleAssignee(userId: string) {
+  if (!task.value) return
+  const cur = new Set(assigneeIds.value)
+  cur.has(userId) ? cur.delete(userId) : cur.add(userId)
+  const newIds = [...cur]
+  await tasksStore.updateTask(task.value.id, {
+    assignee_ids: newIds,
+    assignee_id: newIds[0] || null,
+    updated_by: userStore.currentUser?.id,
+  } as any)
+}
+
+async function saveTitle() {
+  if (!task.value || titleEdit.value === task.value.title) return
+  await tasksStore.updateTask(task.value.id, {
+    title: titleEdit.value, updated_by: userStore.currentUser?.id,
+  })
+}
+
+async function saveDescription() {
+  if (!task.value || descEdit.value === (task.value.description || '')) return
+  await tasksStore.updateTask(task.value.id, {
+    description: descEdit.value, updated_by: userStore.currentUser?.id,
+  })
+}
+
+async function changePriority(priority: 'urgent' | 'important' | 'normal' | 'none') {
+  if (!task.value) return
+  await api(`/api/tasks/${task.value.id}/priority`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ priority, updated_by: userStore.currentUser?.id }),
+  })
+  task.value.priority = priority
+}
+
+async function changeCycle(cycleId: string | null) {
+  if (!task.value) return
+  await tasksStore.updateTask(task.value.id, {
+    cycle_id: cycleId, updated_by: userStore.currentUser?.id,
+  } as any)
+}
+
+async function changeStartDate(date: string) {
+  if (!task.value) return
+  await tasksStore.updateTask(task.value.id, {
+    start_date: date || null, updated_by: userStore.currentUser?.id,
+  } as any)
+}
+
+async function changeDueDate(date: string) {
+  if (!task.value) return
+  await tasksStore.updateTask(task.value.id, {
+    due_date: date || null, updated_by: userStore.currentUser?.id,
+  } as any)
+}
+
+// === ラベル ===
+async function addLabel() {
+  const v = newLabel.value.trim()
+  if (!v || !task.value) return
+  if (labels.value.includes(v)) { newLabel.value = ''; return }
+  const updated = [...labels.value, v]
+  await tasksStore.updateTask(task.value.id, {
+    labels: updated, updated_by: userStore.currentUser?.id,
+  } as any)
+  newLabel.value = ''
+}
+
+async function removeLabel(label: string) {
+  if (!task.value) return
+  const updated = labels.value.filter(l => l !== label)
+  await tasksStore.updateTask(task.value.id, {
+    labels: updated, updated_by: userStore.currentUser?.id,
+  } as any)
+}
+
+// === 子タスク ===
+async function addSubtask() {
+  const title = newSubtaskTitle.value.trim()
+  if (!title || !task.value || !userStore.currentUser?.id || !projectsStore.currentProject) return
+  await tasksStore.createTask({
+    project_id: projectsStore.currentProject.id,
+    parent_task_id: task.value.id,
+    title,
+    created_by: userStore.currentUser.id,
+  })
+  newSubtaskTitle.value = ''
+  await tasksStore.fetchTask(task.value.id)
+}
+
+async function toggleSubtaskDone(child: Task) {
+  if (!userStore.currentUser?.id || !task.value) return
+  const next = child.status === 'completed' ? 'not_started' : 'completed'
+  await tasksStore.updateStatus(child.id, next, userStore.currentUser.id)
+  await tasksStore.fetchTask(task.value.id)
+}
+
+function openSubtask(child: Task) {
+  router.push(`/${groupSlug.value}/${projectSlug.value}/tasks/${child.task_number}`)
+}
+
+// === コメント ===
 const newComment = ref('')
-const isEditing = ref(false)
-const editForm = ref({
-  title: '',
-  description: '',
-  due_date: '',
-  priority: 'normal' as Task['priority'],
-  status: 'not_started' as Task['status'],
-  assignee_id: '' as string,
-})
-
-async function loadTask() {
-  let taskData: Task | null = null
-
-  if (taskId.value) {
-    // 旧形式
-    await tasksStore.fetchTask(taskId.value)
-    taskData = tasksStore.currentTask
-  } else if (groupSlug.value && instanceKey.value && taskNumber.value) {
-    // 新形式: /api/browse/:slug/:instanceKey/tasks/:taskNumber
-    try {
-      const res = await fetch(`/api/browse/${groupSlug.value}/${instanceKey.value}/tasks/${taskNumber.value}`)
-      if (res.ok) {
-        taskData = await res.json()
-        tasksStore.currentTask = taskData
-      }
-    } catch (error) {
-      console.error('Failed to fetch task:', error)
-    }
-  }
-
-  if (taskData) {
-    // コメントとメンバー取得
-    await Promise.all([
-      tasksStore.fetchComments(taskData.id),
-      groupsStore.fetchMembers(resolvedGroupId.value),
-    ])
-
-    editForm.value = {
-      title: taskData.title,
-      description: taskData.description || '',
-      due_date: taskData.due_date || '',
-      priority: taskData.priority,
-      status: taskData.status,
-      assignee_id: taskData.assignee_id || '',
-    }
-  }
-}
-
-onMounted(() => {
-  loadTask()
-})
-
-watch([taskId, taskNumber], () => {
-  loadTask()
-})
-
-function goBack() {
-  if (groupSlug.value && instanceKey.value) {
-    router.push(`/${groupSlug.value}/${instanceKey.value}`)
-  } else {
-    router.push(`/groups/${resolvedGroupId.value}/tasks`)
-  }
-}
-
-async function submitComment() {
-  if (!newComment.value.trim() || !userStore.currentUser) return
-
-  await tasksStore.addComment(
-    taskId.value,
-    userStore.currentUser.id,
-    newComment.value.trim()
-  )
+async function addComment() {
+  if (!task.value || !userStore.currentUser?.id || !newComment.value.trim()) return
+  await tasksStore.addComment(task.value.id, userStore.currentUser.id, newComment.value.trim())
   newComment.value = ''
 }
 
-async function saveChanges() {
-  await tasksStore.updateTask(taskId.value, editForm.value)
-  isEditing.value = false
+const PRIORITY_OPTIONS = [
+  { value: 'urgent', label: '緊急', color: 'text-destructive' },
+  { value: 'important', label: '重要', color: 'text-warning' },
+  { value: 'normal', label: '通常', color: 'text-info' },
+  { value: 'none', label: '－', color: 'text-muted-foreground' },
+] as const
+
+function backToProject() {
+  router.push(`/${groupSlug.value}/${projectSlug.value}`)
 }
 
-async function updateStatus(status: Task['status']) {
-  await tasksStore.updateStatus(taskId.value, status)
+function userInitial(name?: string) {
+  return name?.charAt(0) ?? '?'
 }
 
-function formatDate(dateStr: string | null) {
-  if (!dateStr) return ''
-  return new Date(dateStr).toLocaleDateString('ja-JP', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  })
+function formatDate(s: string) {
+  const d = new Date(s.replace(' ', 'T') + (s.includes('T') ? '' : 'Z'))
+  return d.toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' })
 }
-
-function formatDateTime(dateStr: string) {
-  return new Date(dateStr).toLocaleString('ja-JP', {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
-
-const priorityLabels: Record<string, string> = {
-  urgent: '🔴 緊急',
-  important: '🟡 重要',
-  normal: '普通',
-  none: 'なし',
-}
-
-const statusOptions: { value: Task['status']; label: string }[] = [
-  { value: 'not_started', label: '未着手' },
-  { value: 'in_progress', label: '進行中' },
-  { value: 'completed', label: '完了' },
-]
 </script>
 
 <template>
-  <div class="task-detail-page">
-    <div class="page-header">
-      <button class="back-btn" @click="goBack">← タスク一覧</button>
-      <div class="header-actions">
+  <PageContainer narrow>
+    <div v-if="!task" class="text-muted-foreground py-12 text-center">読み込み中…</div>
+    <div v-else class="space-y-5">
+      <div class="flex items-center gap-2 text-xs text-muted-foreground">
+        <button @click="backToProject" class="hover:text-foreground">{{ task.project_name }}</button>
+        <span>/</span>
+        <span>T-{{ task.task_number }}</span>
+      </div>
+
+      <!-- タイトル + チェック -->
+      <div class="flex items-start gap-3">
         <button
-          v-if="!isEditing"
-          class="btn btn-secondary"
-          @click="isEditing = true"
+          class="w-6 h-6 mt-1.5 rounded-full border-2 flex items-center justify-center shrink-0 transition-colors"
+          :class="isDone ? 'border-success bg-success' : 'border-input hover:border-info'"
+          @click="toggleDone"
+          :title="isDone ? '完了に戻す' : '完了にする'"
         >
-          編集
+          <svg v-if="isDone" class="w-3.5 h-3.5 text-success-foreground" viewBox="0 0 12 12" fill="none">
+            <path d="M2 6 L5 9 L10 3" stroke="currentColor" stroke-width="2" />
+          </svg>
         </button>
-        <template v-else>
-          <button class="btn btn-secondary" @click="isEditing = false">
-            キャンセル
-          </button>
-          <button class="btn btn-primary" @click="saveChanges">
-            保存
-          </button>
-        </template>
+        <Input
+          v-model="titleEdit"
+          @blur="saveTitle"
+          class="text-xl font-bold !h-auto !py-2 flex-1"
+          :class="{ 'line-through opacity-60': isDone }"
+        />
       </div>
-    </div>
 
-    <div v-if="tasksStore.currentTask" class="task-content">
-      <div class="main-section">
-        <!-- タイトル -->
-        <div v-if="isEditing" class="form-group">
-          <label>タスク名</label>
-          <input v-model="editForm.title" type="text" class="title-input" />
-        </div>
-        <h1 v-else class="task-title">{{ tasksStore.currentTask.title }}</h1>
+      <!-- メタデータ帯 -->
+      <div class="flex flex-wrap items-center gap-2 text-sm">
+        <!-- 優先度 -->
+        <select
+          :value="task.priority"
+          @change="changePriority(($event.target as HTMLSelectElement).value as any)"
+          class="h-8 rounded-md border border-input bg-background px-2 text-xs"
+          title="優先度"
+        >
+          <option v-for="p in PRIORITY_OPTIONS" :key="p.value" :value="p.value">優先度: {{ p.label }}</option>
+        </select>
 
-        <!-- メタ情報 -->
-        <div class="task-meta">
-          <div class="meta-item">
-            <span class="meta-label">ステータス</span>
-            <div v-if="isEditing">
-              <select v-model="editForm.status">
-                <option v-for="opt in statusOptions" :key="opt.value" :value="opt.value">
-                  {{ opt.label }}
-                </option>
-              </select>
-            </div>
-            <div v-else class="status-buttons">
-              <button
-                v-for="opt in statusOptions"
-                :key="opt.value"
-                class="status-btn"
-                :class="{ active: tasksStore.currentTask.status === opt.value }"
-                @click="updateStatus(opt.value)"
-              >
-                {{ opt.label }}
-              </button>
-            </div>
-          </div>
+        <!-- 開始日 -->
+        <label class="flex items-center gap-1 text-xs text-muted-foreground">
+          開始
+          <input
+            type="date"
+            :value="task.start_date || ''"
+            @change="changeStartDate(($event.target as HTMLInputElement).value)"
+            class="h-8 rounded-md border border-input bg-background px-2 text-xs"
+          />
+        </label>
 
-          <div class="meta-item">
-            <span class="meta-label">優先度</span>
-            <select v-if="isEditing" v-model="editForm.priority">
-              <option value="urgent">緊急</option>
-              <option value="important">重要</option>
-              <option value="normal">普通</option>
-              <option value="none">なし</option>
-            </select>
-            <span v-else>{{ priorityLabels[tasksStore.currentTask.priority] }}</span>
-          </div>
+        <!-- 期限 -->
+        <label class="flex items-center gap-1 text-xs text-muted-foreground">
+          期限
+          <input
+            type="date"
+            :value="task.due_date || ''"
+            @change="changeDueDate(($event.target as HTMLInputElement).value)"
+            class="h-8 rounded-md border border-input bg-background px-2 text-xs"
+          />
+        </label>
 
-          <div class="meta-item">
-            <span class="meta-label">期限</span>
-            <input v-if="isEditing" v-model="editForm.due_date" type="date" />
-            <span v-else>{{ formatDate(tasksStore.currentTask.due_date) || '未設定' }}</span>
-          </div>
+        <!-- サイクル -->
+        <select
+          v-if="projectsStore.cycles.length > 0"
+          :value="task.cycle_id || ''"
+          @change="changeCycle(($event.target as HTMLSelectElement).value || null)"
+          class="h-8 rounded-md border border-input bg-background px-2 text-xs"
+        >
+          <option value="">サイクル: なし</option>
+          <option v-for="c in projectsStore.cycles" :key="c.id" :value="c.id">{{ c.name }}</option>
+        </select>
 
-          <div class="meta-item">
-            <span class="meta-label">担当者</span>
-            <select v-if="isEditing" v-model="editForm.assignee_id">
-              <option value="">未割当</option>
-              <option
-                v-for="member in groupsStore.members"
-                :key="member.id"
-                :value="member.id"
-              >
-                {{ member.name }}
-              </option>
-            </select>
-            <span v-else>{{ tasksStore.currentTask.assignee_name || '未割当' }}</span>
-          </div>
-        </div>
-
-        <!-- 説明 -->
-        <div class="description-section">
-          <h3>説明</h3>
-          <textarea
-            v-if="isEditing"
-            v-model="editForm.description"
-            rows="4"
-            placeholder="タスクの説明を入力"
-          ></textarea>
-          <p v-else-if="tasksStore.currentTask.description" class="description">
-            {{ tasksStore.currentTask.description }}
-          </p>
-          <p v-else class="no-description">説明なし</p>
-        </div>
-
-        <!-- 子タスク -->
-        <div v-if="tasksStore.currentTask.children?.length" class="children-section">
-          <h3>子タスク</h3>
-          <div class="children-list">
+        <!-- 担当者 -->
+        <div class="relative">
+          <button
+            class="h-8 rounded-md border border-input bg-background px-2 text-xs flex items-center gap-1.5 hover:bg-muted"
+            @click="showAssignees = !showAssignees"
+          >
+            <span class="text-muted-foreground">担当:</span>
+            <template v-if="assigneeNames.length === 0">
+              <span class="text-muted-foreground">未割当</span>
+            </template>
+            <template v-else>
+              <span
+                v-for="(name, i) in assigneeNames.slice(0, 3)"
+                :key="i"
+                class="w-5 h-5 rounded-full bg-info/15 text-info text-xs flex items-center justify-center font-medium"
+                :title="name"
+              >{{ userInitial(name) }}</span>
+              <span v-if="assigneeNames.length > 3" class="text-muted-foreground">+{{ assigneeNames.length - 3 }}</span>
+            </template>
+          </button>
+          <div
+            v-if="showAssignees"
+            class="absolute top-full left-0 mt-1 w-64 max-h-64 overflow-auto bg-card border border-border rounded-md shadow-lg z-30 py-1"
+            @click.stop
+          >
             <div
-              v-for="child in tasksStore.currentTask.children"
-              :key="child.id"
-              class="child-task"
-              @click="router.push(`/groups/${groupId}/tasks/${child.id}`)"
+              v-for="m in groupsStore.members"
+              :key="m.id"
+              class="flex items-center gap-2 px-3 py-1.5 hover:bg-muted cursor-pointer"
+              @click="toggleAssignee(m.id)"
             >
-              <span class="child-status">{{ child.status === 'completed' ? '☑' : '☐' }}</span>
-              <span class="child-title">{{ child.title }}</span>
-              <span class="child-due">{{ formatDate(child.due_date) }}</span>
+              <input type="checkbox" :checked="assigneeIds.includes(m.id)" class="pointer-events-none" />
+              <span class="w-6 h-6 rounded-full bg-info/15 text-info text-xs flex items-center justify-center font-medium">
+                {{ userInitial(m.name) }}
+              </span>
+              <span class="text-sm">{{ m.name }}</span>
             </div>
           </div>
         </div>
+      </div>
 
-        <!-- コメント -->
-        <div class="comments-section">
-          <h3>コメント</h3>
-          <div class="comments-list">
-            <div
-              v-for="comment in tasksStore.comments"
-              :key="comment.id"
-              class="comment"
-              :class="{ 'ai-comment': comment.is_ai_generated }"
+      <!-- ラベル -->
+      <div class="flex flex-wrap items-center gap-1.5">
+        <span class="text-xs text-muted-foreground">ラベル:</span>
+        <span
+          v-for="label in labels"
+          :key="label"
+          class="text-xs px-2 py-0.5 rounded-full bg-info/10 text-info flex items-center gap-1 group"
+        >
+          {{ label }}
+          <button class="opacity-50 group-hover:opacity-100 hover:text-destructive" @click="removeLabel(label)">×</button>
+        </span>
+        <input
+          v-model="newLabel"
+          type="text"
+          placeholder="+ ラベル追加（Enter）"
+          class="h-7 text-xs rounded-md border border-input bg-background px-2 w-32"
+          @keydown.enter="addLabel"
+        />
+      </div>
+
+      <!-- 説明 -->
+      <Textarea v-model="descEdit" @blur="saveDescription" rows="3" placeholder="説明（Markdown）" class="resize-y" />
+
+      <!-- 子タスク -->
+      <div class="border-t border-border pt-4">
+        <h3 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-3">子タスク</h3>
+        <div class="space-y-1">
+          <div
+            v-for="child in (task.children || [])"
+            :key="child.id"
+            class="flex items-center gap-2.5 px-2 py-1.5 hover:bg-muted/50 rounded-md cursor-pointer"
+            @click="openSubtask(child)"
+          >
+            <button
+              class="w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0"
+              :class="child.status === 'completed' ? 'border-success bg-success' : 'border-input hover:border-info'"
+              @click.stop="toggleSubtaskDone(child)"
             >
-              <div class="comment-header">
-                <span class="comment-author">
-                  {{ comment.is_ai_generated ? '🤖 AI' : comment.user_name }}
-                </span>
-                <span class="comment-time">{{ formatDateTime(comment.created_at) }}</span>
-              </div>
-              <p class="comment-content">{{ comment.content }}</p>
-            </div>
-
-            <div v-if="tasksStore.comments.length === 0" class="no-comments">
-              コメントはありません
-            </div>
-          </div>
-
-          <div class="comment-input">
-            <textarea
-              v-model="newComment"
-              placeholder="コメントを入力..."
-              rows="2"
-              @keydown.meta.enter="submitComment"
-              @keydown.ctrl.enter="submitComment"
-            ></textarea>
-            <button class="btn btn-primary" @click="submitComment">
-              送信
+              <svg v-if="child.status === 'completed'" class="w-3 h-3 text-success-foreground" viewBox="0 0 12 12">
+                <path d="M2 6 L5 9 L10 3" stroke="currentColor" stroke-width="2" fill="none" />
+              </svg>
             </button>
+            <span class="text-xs text-muted-foreground">#{{ child.task_number }}</span>
+            <span class="flex-1 text-sm" :class="{ 'line-through text-muted-foreground': child.status === 'completed' }">{{ child.title }}</span>
+            <span v-if="child.assignee_name" class="text-xs text-muted-foreground">{{ child.assignee_name }}</span>
+          </div>
+          <div class="flex items-center gap-2 pt-2">
+            <Input
+              v-model="newSubtaskTitle"
+              placeholder="子タスクを追加（Enter）"
+              class="text-sm"
+              @keydown.enter="addSubtask"
+            />
+            <Button :disabled="!newSubtaskTitle.trim()" size="sm" @click="addSubtask">追加</Button>
+          </div>
+        </div>
+      </div>
+
+      <!-- コメント -->
+      <div class="border-t border-border pt-4">
+        <h3 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-3">コメント</h3>
+        <div class="space-y-3">
+          <div v-for="c in tasksStore.comments" :key="c.id" class="flex gap-2 items-start">
+            <span class="w-7 h-7 rounded-full bg-info/15 text-info text-xs flex items-center justify-center font-medium shrink-0">
+              {{ userInitial(c.user_name) }}
+            </span>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="text-sm font-medium">{{ c.user_name }}</span>
+                <span class="text-xs text-muted-foreground">{{ formatDate(c.created_at) }}</span>
+              </div>
+              <p class="text-sm whitespace-pre-wrap">{{ c.content }}</p>
+            </div>
+          </div>
+          <div class="flex gap-2 pt-2">
+            <Textarea v-model="newComment" rows="1" placeholder="コメント…" />
+            <Button :disabled="!newComment.trim()" @click="addComment">送信</Button>
           </div>
         </div>
       </div>
     </div>
 
-    <div v-else class="loading">読み込み中...</div>
-  </div>
+    <div v-if="showAssignees" class="fixed inset-0 z-20" @click="showAssignees = false"></div>
+  </PageContainer>
 </template>
-
-<style scoped>
-.task-detail-page {
-  max-width: 800px;
-  margin: 0 auto;
-}
-
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 1.5rem;
-}
-
-.back-btn {
-  background: none;
-  border: none;
-  color: #666;
-  cursor: pointer;
-  font-size: 0.875rem;
-  padding: 0;
-}
-
-.back-btn:hover {
-  color: #1a1a2e;
-}
-
-.header-actions {
-  display: flex;
-  gap: 0.5rem;
-}
-
-.task-content {
-  background: white;
-  border-radius: 12px;
-  padding: 1.5rem;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-}
-
-.task-title {
-  font-size: 1.5rem;
-  color: #1a1a2e;
-  margin: 0 0 1rem 0;
-}
-
-.title-input {
-  font-size: 1.25rem;
-  font-weight: 600;
-  width: 100%;
-  padding: 0.5rem;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-}
-
-.task-meta {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 1rem;
-  padding: 1rem;
-  background: #f8f9fa;
-  border-radius: 8px;
-  margin-bottom: 1.5rem;
-}
-
-.meta-item {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-
-.meta-label {
-  font-size: 0.75rem;
-  color: #666;
-  text-transform: uppercase;
-}
-
-.meta-item select,
-.meta-item input {
-  padding: 0.375rem 0.5rem;
-  border: 1px solid #ddd;
-  border-radius: 4px;
-  font-size: 0.875rem;
-}
-
-.status-buttons {
-  display: flex;
-  gap: 0.25rem;
-}
-
-.status-btn {
-  padding: 0.25rem 0.5rem;
-  border: 1px solid #ddd;
-  background: white;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  cursor: pointer;
-}
-
-.status-btn.active {
-  background: #4cc9f0;
-  border-color: #4cc9f0;
-  color: #1a1a2e;
-}
-
-.description-section,
-.children-section,
-.comments-section {
-  margin-bottom: 1.5rem;
-}
-
-.description-section h3,
-.children-section h3,
-.comments-section h3 {
-  font-size: 1rem;
-  color: #1a1a2e;
-  margin: 0 0 0.75rem 0;
-}
-
-.description {
-  color: #333;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  margin: 0;
-}
-
-.no-description {
-  color: #999;
-  font-style: italic;
-  margin: 0;
-}
-
-.description-section textarea {
-  width: 100%;
-  padding: 0.75rem;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  font-size: 0.875rem;
-  resize: vertical;
-}
-
-.children-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-.child-task {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 0.75rem;
-  background: #f8f9fa;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-.child-task:hover {
-  background: #e9ecef;
-}
-
-.child-status {
-  font-size: 1rem;
-}
-
-.child-title {
-  flex: 1;
-  font-size: 0.875rem;
-}
-
-.child-due {
-  font-size: 0.75rem;
-  color: #666;
-}
-
-.comments-list {
-  margin-bottom: 1rem;
-}
-
-.comment {
-  padding: 0.75rem;
-  border-bottom: 1px solid #eee;
-}
-
-.comment:last-child {
-  border-bottom: none;
-}
-
-.comment.ai-comment {
-  background: #f0f9ff;
-  border-radius: 6px;
-  border-bottom: none;
-  margin-bottom: 0.5rem;
-}
-
-.comment-header {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 0.25rem;
-}
-
-.comment-author {
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: #1a1a2e;
-}
-
-.comment-time {
-  font-size: 0.75rem;
-  color: #999;
-}
-
-.comment-content {
-  font-size: 0.875rem;
-  color: #333;
-  margin: 0;
-  line-height: 1.5;
-}
-
-.no-comments {
-  color: #999;
-  text-align: center;
-  padding: 1rem;
-}
-
-.comment-input {
-  display: flex;
-  gap: 0.5rem;
-}
-
-.comment-input textarea {
-  flex: 1;
-  padding: 0.625rem;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  font-size: 0.875rem;
-  resize: none;
-}
-
-.loading {
-  text-align: center;
-  color: #666;
-  padding: 2rem;
-}
-
-/* ボタン */
-.btn {
-  padding: 0.5rem 1rem;
-  border-radius: 6px;
-  font-size: 0.875rem;
-  font-weight: 500;
-  cursor: pointer;
-  border: none;
-}
-
-.btn-primary {
-  background: #4cc9f0;
-  color: #1a1a2e;
-}
-
-.btn-secondary {
-  background: #e0e0e0;
-  color: #333;
-}
-
-.form-group {
-  margin-bottom: 1rem;
-}
-
-.form-group label {
-  display: block;
-  font-size: 0.875rem;
-  font-weight: 500;
-  margin-bottom: 0.5rem;
-}
-</style>

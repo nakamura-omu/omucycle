@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { api } from '@/lib/api'
 
 export interface User {
   id: string
@@ -17,14 +18,11 @@ export const useUserStore = defineStore('user', () => {
   const isLoggedIn = computed(() => currentUser.value !== null)
 
   async function fetchCurrentUser() {
-    // TODO: 認証実装後に実際のユーザー取得に変更
-    // 現在はデモユーザーを使用
     isLoading.value = true
     try {
-      const res = await fetch('/api/users')
-      const users = await res.json()
-      if (users.length > 0) {
-        currentUser.value = users[0]
+      const res = await api('/api/me')
+      if (res.ok) {
+        currentUser.value = await res.json()
       }
     } catch (error) {
       console.error('Failed to fetch user:', error)

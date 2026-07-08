@@ -2,7 +2,30 @@
 
 ## プロジェクト概要
 
-大学事務向けの業務サイクル管理システム。従来のプロジェクト管理ツールの「始まり→終わり」の一回性ではなく、年間カレンダーを軸とした業務サイクルの管理と、AIを活用した意思決定支援・ナレッジ蓄積を実現する。
+大学事務向けの業務管理システム。Todoist／Plane／Notion 風の軽量な「プロジェクト + ふせん + サイクル + Wiki」構成で、AIを活用した意思決定支援・ナレッジ蓄積を実現する。
+
+## 2026-05 大改修
+
+業務テンプレート前提の重い構造を捨て、Todoist／Plane／Notion 風に再構築。詳細は `docs/redesign-2026-05/`。
+
+### 階層
+
+```
+Group → Project → (Cycle, Task, StickyBoard, Wiki)
+```
+
+- **Project**: タスクの主要コンテナ（旧 job_definitions/job_instances を統合）
+- **Cycle**: プロジェクト単位のスプリント（Plane風、時間区切り）
+- **Task**: 3段階固定ステータス `not_started/in_progress/completed`、進捗% は `task_progress_logs` に自由記録
+- **StickyBoard**: プロジェクトに紐付くふせんボード、付箋とタスクは1対1双方向、投げ縄/重なりでグルーピング、関係線
+- **Wiki**: グループ単位、階層ページ、シンプルなMarkdownエディタ
+
+### 廃止した機能
+
+- 業務テンプレート (`job_definitions`, `task_templates`, `workflow_rules`, `template_shares`)
+- 業務インスタンス (`job_instances`)
+- カスタムステータス (`group_statuses`)
+- Timez（つぶやき）→ omu-office 側に移管
 
 ## 技術スタック
 
@@ -161,6 +184,9 @@ npm run type-check
 - [x] 複数担当者対応（assignee_ids）
 
 ### 開発予定
+- [ ] プロジェクト階層構造（設計済み、下記参照）
+- [ ] 付箋モード（個人メモ、設計済み、下記参照）
+- [ ] UI 暖色化（付箋ボードのデザイン言語を全体に適用）
 - [ ] マイタスク（個人ビュー）
 - [ ] マイカレンダー
 - [ ] 認証機能（Entra ID SSO）
@@ -168,12 +194,171 @@ npm run type-check
 - [ ] ナレッジベース
 - [ ] タスクテンプレート編集機能
 
+## 設計: プロジェクト階層構造
+
+### 概要
+
+グループ内に「プロジェクト」（フォルダ的な概念）を導入し、業務インスタンスをプロジェクト単位で整理する。
+Teams のチャンネルと同じ考え方で、プロジェクト単位でアクセス制御が可能。
+
+### データ構造の変更
+
+```
+【現状】
+Group → job_instances (フラット)
+
+【変更後】
+Group → projects (フォルダ) → job_instances
+       ├── 📁 プロジェクトA/
+       │   ├── 業務インスタンス A-1
+       │   └── 業務インスタンス A-2
+       ├── 📁 プロジェクトB/
+       │   └── 📁 サブプロジェクト B-1/   ← ネスト可能
+       │       └── 業務インスタンス B-1-1
+       └── 業務インスタンス C（直置き、プロジェクト未所属も許可）
+```
+
+### DB スキーマ
+
+```sql
+-- 新テーブル: プロジェクト
+CREATE TABLE projects (
+    id TEXT PRIMARY KEY,
+    group_id TEXT NOT NULL REFERENCES groups(id),
+    parent_project_id TEXT REFERENCES projects(id),
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    description TEXT,
+    sort_order INTEGER DEFAULT 0,
+    created_by TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- プロジェクト単位のアクセス制御
+-- レコードなし = グループ全員がアクセス可（既存動作を壊さない）
+-- レコードあり = 指定ユーザーのみアクセス可
+CREATE TABLE project_members (
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    user_id TEXT NOT NULL,
+    role TEXT DEFAULT 'member',  -- viewer / member / admin
+    PRIMARY KEY (project_id, user_id)
+);
+
+-- job_instances にプロジェクト紐付けを追加
+ALTER TABLE job_instances ADD COLUMN project_id TEXT REFERENCES projects(id);
+```
+
+### URL 設計
+
+```
+/:slug/projects                        # プロジェクト一覧
+/:slug/projects/:projectSlug           # プロジェクト内の業務一覧
+/:slug/projects/:projectSlug/:PREFIX-N # プロジェクト内の業務タスク
+```
+
+### API 設計
+
+```
+GET    /api/groups/:id/projects              # プロジェクト一覧（権限フィルタ付き）
+POST   /api/groups/:id/projects              # プロジェクト作成
+PUT    /api/projects/:id                     # プロジェクト更新
+DELETE /api/projects/:id                     # プロジェクト削除
+GET    /api/projects/:id/members             # メンバー一覧
+POST   /api/projects/:id/members             # メンバー追加
+DELETE /api/projects/:id/members/:userId     # メンバー削除
+```
+
+### 権限モデル
+
+- `project_members` にレコードがない → グループ全員がアクセス可能（オープン）
+- `project_members` にレコードがある → 登録ユーザーのみアクセス可能（制限付き）
+- プロジェクト admin → メンバー管理、プロジェクト設定変更が可能
+- グループ owner/admin → 全プロジェクトにアクセス可能（override）
+
+## 設計: 付箋モード
+
+### 概要
+
+タスク作成の「項目が多くて重い・面倒」という課題を解消するための、構造化前のメモ置き場。
+個人用のふせんボードとして提供し、必要に応じてタスクに昇格させる。
+
+### 役割分担
+
+- **ふせんボード** = 構造化前の「とりあえずメモ」置き場
+- **omucycle タスク** = 構造化して管理する場所
+
+### 機能
+
+- カンバン形式（デフォルト列: やること / やってる / おわった）
+- ドラッグ＆ドロップで列間移動
+- 色分け 6 色（きいろ、ピンク、みどり、あお、むらさき、オレンジ）
+- 列の追加・名前変更・削除
+- 付箋の編集・削除
+- 「タスクにする →」ボタン → タスク作成画面に `?title=テキスト` で遷移
+- タスク化済みマーク表示
+
+### デザイン
+
+- フォント: `Zen Maru Gothic`（やわらかい丸ゴシック）
+- 背景: 暖色系グラデーション（`#FFF8E7` → `#F0E6D3` → `#E8DDD0`）
+- 付箋がわずかにランダムに傾いてリアル感
+- ホバーで水平に戻り拡大するアニメーション
+
+### DB スキーマ
+
+```sql
+CREATE TABLE sticky_notes (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    column_id TEXT NOT NULL DEFAULT 'todo',
+    text TEXT NOT NULL DEFAULT '',
+    color INTEGER DEFAULT 0,
+    rotation REAL DEFAULT 0,
+    sort_order INTEGER DEFAULT 0,
+    task_id TEXT REFERENCES tasks(id),  -- タスク化済みの場合
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE sticky_columns (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    title TEXT NOT NULL,
+    emoji TEXT DEFAULT '',
+    sort_order INTEGER DEFAULT 0
+);
+```
+
+### URL
+
+```
+/my/sticky    # 個人の付箋ボード
+```
+
+### 今後の拡張可能性
+
+- プロジェクト単位の共有ふせんボード（チーム利用）
+- ふせんからの直接タスク作成（画面遷移なし）
+
+### プロトタイプ
+
+React JSX のプロトタイプが sui-memory に保存済み（ID:85）。
+omucycle は Vue なので Vue コンポーネントに移植して実装する。
+
 ## デモデータ
 
 `npm run db:reset` で以下が作成される:
 - ユーザー: admin@example.com, user1@example.com, user2@example.com
 - グループ: 総務部、経理部
 - サンプルタスク
+
+## 開発スタンス
+
+- ユーザーから仕様の提案があった場合、そのまま実装するだけでなく、より良いアプローチがあればサジェストすること
+- 「こうした方がいいかも」「この設計だと将来こういう問題が出そう」など、建設的な代替案を提示する
+- ただし最終判断はユーザーに委ねる。押し付けない
+- 技術選定・データモデル・UI設計いずれもサジェスト対象
 
 ## 注意事項
 
@@ -428,3 +613,68 @@ npm run dev:logs       # ログ表示
 - `scripts/dev-server.sh` - サーバー管理スクリプト
 - `.pids/` - PIDファイル格納ディレクトリ
 - `.logs/` - ログファイル格納ディレクトリ
+
+## UIグランドルール
+
+shadcn-vue + Tailwind CSS v4 ベースの宣言的UI設計ルール。
+
+### カラー
+| 用途 | 使うクラス | 禁止 |
+|------|-----------|------|
+| 本文テキスト | `text-foreground` | `text-[#1a1a2e]`, `text-[#333]` |
+| 補助テキスト | `text-muted-foreground` | `text-[#666]`, `text-[#999]` |
+| ボーダー | `border-border` / `border-input` | `border-[#e5e7eb]`, `border-[#e0e0e0]` |
+| 背景 | `bg-card` / `bg-muted` / `bg-background` | `bg-white`, `bg-[#f8f9fa]` |
+| サイドバーテキスト | `text-sidebar-foreground` | `text-[#ccc]` |
+| サイドバーセクションタイトル | `text-muted-foreground` | `text-[#666]` |
+| アクセントカラー（インジゴ） | `text-info` / `bg-info/10` | `text-[#4338ca]` |
+| 成功 | `text-success` / `bg-success` | `text-[#22c55e]` |
+| 警告 | `text-warning` / `bg-warning` | `text-[#f59e0b]` |
+| エラー | `text-danger` / `text-destructive` | `text-[#dc2626]` |
+
+### フォントサイズ（Tailwind標準スケールのみ使用）
+| 用途 | クラス | 禁止 |
+|------|--------|------|
+| ページタイトル | `text-xl` or `text-2xl` | |
+| セクション見出し | `text-lg` or `text-base font-semibold` | |
+| 本文 | `text-sm` | `text-[13px]`, `text-[0.875rem]` |
+| ラベル / キャプション | `text-xs` | `text-[11px]`, `text-[10px]`, `text-[0.7rem]` |
+| バッジ内テキスト | `text-xs` | `text-[10px]`, `text-[0.65rem]` |
+
+### スペーシング規約
+| 用途 | クラス |
+|------|--------|
+| ページ内セクション間 | `mb-6` or `space-y-6` |
+| カード内セクション間 | `space-y-4` |
+| フォーム項目間 | `space-y-4` |
+| リスト項目間 | `gap-2` |
+| インライン要素間 | `gap-2` |
+
+### コンポーネント選択
+| 場面 | 使うもの | 禁止 |
+|------|---------|------|
+| アクションボタン | `<Button>` | 生の `<button>` + Tailwindクラス |
+| 透明ボタン | `<Button variant="ghost">` | `<button class="bg-transparent border-0 ...">` |
+| アウトラインボタン | `<Button variant="outline">` | |
+| モーダル | `<Dialog>` | `v-if` + overlay div |
+| 入力フィールド | `<Input>` | 生の `<input>` + Tailwindクラス |
+| テキストエリア | `<Textarea>` | 生の `<textarea>` + Tailwindクラス |
+| ページ全体ラッパー | `<PageContainer>` / `<PageContainer narrow>` | `max-w-[Xpx] mx-auto` |
+| ページ見出し | `<PageHeader title="...">` | 手書きの flex + h2 |
+| 空状態 | `<EmptyState message="...">` | 手書きの text-center div |
+| カードセクション | `<Card>` + `<CardContent>` | `bg-card rounded-xl shadow-sm` div |
+| セレクト | ネイティブ `<select>` + Tailwindクラス | (shadcn Selectは使わない) |
+| チェックボックスリスト | ネイティブ checkbox + Tailwind | (同上) |
+
+### scoped CSS が許可される場面
+- カレンダーの7列グリッド (`GroupCalendar.vue`)
+- D&Dインジケータ (`TaskPane.vue`)
+- スライドアニメーション (`JobInstanceList.vue`)
+- リアクションUI (`TaskComments.vue`)
+- **上記以外ではscoped CSSを使わない**
+
+### 任意値 (`[...]`) の使用ルール
+- **幅/高さ**: レイアウト上の固定値はOK (`w-[280px]`, `w-[750px]` 等)
+- **カラー**: **禁止** — 必ずテーマトークンを使う
+- **フォントサイズ**: **禁止** — Tailwind標準スケールを使う
+- **スペーシング**: 原則禁止。標準スケールで表現できない場合のみ許可

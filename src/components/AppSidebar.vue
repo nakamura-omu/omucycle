@@ -1,184 +1,261 @@
 <script setup lang="ts">
 import { useRoute, useRouter } from 'vue-router'
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, watch, ref } from 'vue'
 import { useGroupsStore } from '@/stores/groups'
+import { useUserStore } from '@/stores/user'
+import { useProjectsStore } from '@/stores/projects'
+
+const emit = defineEmits<{ openQuickAdd: []; openAiChat: [] }>()
 
 const route = useRoute()
 const router = useRouter()
 const groupsStore = useGroupsStore()
+const userStore = useUserStore()
+const projectsStore = useProjectsStore()
 
-// 旧形式（/groups/:id）または新形式（/:slug）のどちらか
-const isGroupPage = computed(() => {
-  return route.path.startsWith('/groups/') ||
-    (route.params.groupSlug && !['my', 'inbox', 'flashcard', 'settings', 'timez'].includes(route.params.groupSlug as string))
-})
-const groupId = computed(() => route.params.groupId as string | undefined)
-const groupSlug = computed(() => route.params.groupSlug as string | undefined)
-
-// 最後にアクセスしたグループを記憶（グループメニューを開きっぱなしにするため）
-const lastGroupBasePath = ref<string | null>(null)
-
-watch([groupId, groupSlug], () => {
-  if (groupSlug.value) {
-    lastGroupBasePath.value = `/${groupSlug.value}`
-  } else if (groupId.value) {
-    lastGroupBasePath.value = `/groups/${groupId.value}`
-  }
-}, { immediate: true })
-
-// ナビゲーション用のベースパス（現在のグループ or 最後のグループ）
-const groupBasePath = computed(() => {
-  if (groupSlug.value) {
-    return `/${groupSlug.value}`
-  }
-  if (groupId.value) {
-    return `/groups/${groupId.value}`
-  }
-  return lastGroupBasePath.value
+const userInitial = computed(() => {
+  if (!userStore.currentUser?.name) return '?'
+  return userStore.currentUser.name.charAt(0).toUpperCase()
 })
 
-// グループメニューを表示するか（グループにアクセスしたことがあれば表示し続ける）
-const showGroupMenu = computed(() => isGroupPage.value || lastGroupBasePath.value)
+const userMenuOpen = ref(false)
 
-// 個人メニュー
-const personalNavItems = [
-  { path: '/my/tasks', label: 'マイタスク', icon: '📋' },
-  { path: '/my/calendar', label: 'マイカレンダー', icon: '📅' },
-  { path: '/timez', label: 'Timez', icon: '💬' },
-  { path: '/inbox', label: '受信トレイ', icon: '📥' },
-  { path: '/flashcard', label: 'フラッシュカード', icon: '🎴' },
-]
+const currentGroupSlug = computed(() => route.params.groupSlug as string | undefined)
+const currentProjectSlug = computed(() => route.params.projectSlug as string | undefined)
 
-const groupNavItems = computed(() => [
-  { path: `${groupBasePath.value}`, label: 'ダッシュボード', icon: '🏠', exact: true },
-  { path: `${groupBasePath.value}/job-definitions`, label: '業務テンプレート', icon: '📖' },
-  { path: `${groupBasePath.value}/job-instances`, label: '業務タスク', icon: '📂' },
-  { path: `${groupBasePath.value}/tasks`, label: '全タスク', icon: '📋' },
-  { path: `${groupBasePath.value}/calendar`, label: 'カレンダー', icon: '📅' },
-  { path: `${groupBasePath.value}/settings`, label: '設定', icon: '⚙️' },
-])
+const expandedGroups = ref<Set<string>>(new Set())
+const groupProjectsCache = ref<Record<string, any[]>>({})
 
-function navigate(path: string) {
-  router.push(path)
+async function loadGroupProjects(groupId: string) {
+  if (groupProjectsCache.value[groupId]) return
+  await projectsStore.fetchGroupProjects(groupId)
+  groupProjectsCache.value[groupId] = projectsStore.projects.filter((p: any) => p.is_personal === 0)
 }
 
-function isActive(item: { path: string; exact?: boolean }) {
-  if (item.exact) {
-    return route.path === item.path
+async function refresh() {
+  if (!userStore.currentUser?.id) return
+  await groupsStore.fetchMyGroups(userStore.currentUser.id)
+  if (currentGroupSlug.value) {
+    const g = groupsStore.myGroups.find(g => g.slug === currentGroupSlug.value)
+    if (g) {
+      expandedGroups.value.add(g.id)
+      await loadGroupProjects(g.id)
+    }
   }
-  return route.path.startsWith(item.path)
+}
+
+function toggleGroup(group: any) {
+  if (expandedGroups.value.has(group.id)) {
+    expandedGroups.value.delete(group.id)
+  } else {
+    expandedGroups.value.add(group.id)
+    loadGroupProjects(group.id)
+  }
+  expandedGroups.value = new Set(expandedGroups.value)
+}
+
+onMounted(refresh)
+watch(() => userStore.currentUser?.id, refresh)
+watch(currentGroupSlug, refresh)
+
+function navigate(path: string) { router.push(path) }
+function isActivePath(path: string, exact = false) {
+  // インボックスは個人プロジェクト表示中もアクティブ
+  if (path === '/my/inbox' && projectsStore.currentProject?.is_personal) return true
+  if (exact) return route.path === path
+  return route.path === path || route.path.startsWith(path + '/')
+}
+
+const personalItems = [
+  { icon: '📥', label: 'インボックス', path: '/my/inbox' },
+  { icon: '📅', label: '今日', path: '/my/today' },
+  { icon: '📆', label: '近日予定', path: '/my/upcoming' },
+  { icon: '✓', label: 'マイタスク', path: '/my/tasks' },
+  { icon: '🏷️', label: 'フィルター&ラベル', path: '/my/filters' },
+  { icon: '📌', label: 'ふせん', path: '/my/board' },
+  { icon: '🔔', label: '通知', path: '/notifications' },
+]
+
+const myActiveTotal = computed(() =>
+  groupsStore.myGroups.reduce((acc, g) => acc + (g.my_active_tasks ?? 0), 0)
+)
+const unreadTotal = computed(() =>
+  groupsStore.myGroups.reduce((acc, g) => acc + (g.unread_count ?? 0), 0)
+)
+function personalBadge(path: string) {
+  if (path === '/my/tasks') return myActiveTotal.value
+  if (path === '/notifications') return unreadTotal.value
+  return 0
+}
+
+function groupSections(slug: string) {
+  return [
+    { icon: '🗺️', label: 'アトラス', path: `/${slug}/atlas`, comingSoon: false },
+    { icon: '📖', label: 'Wiki', path: `/${slug}/wiki`, comingSoon: false },
+    { icon: '📁', label: 'ファイル', path: `/${slug}/files`, comingSoon: true },
+    { icon: '🔁', label: 'サイクル', path: `/${slug}/cycles`, comingSoon: false },
+    { icon: '⚙️', label: '設定', path: `/${slug}/settings`, comingSoon: false },
+  ]
 }
 </script>
 
 <template>
-  <aside class="app-sidebar">
-    <nav class="sidebar-nav">
-      <!-- 個人メニュー -->
-      <div class="nav-section">
-        <div class="nav-section-title">個人</div>
+  <aside class="w-[240px] bg-sidebar-dark text-sidebar-foreground flex flex-col shrink-0 h-full">
+    <!-- 上部: タスク追加 / AI -->
+    <div class="px-2 pt-3 pb-2 border-b border-sidebar-accent/40 space-y-1.5">
+      <button
+        class="w-full flex items-center gap-2 px-3 py-2 rounded-md bg-info text-info-foreground hover:opacity-90 transition-opacity font-semibold text-sm"
+        @click="emit('openQuickAdd')"
+        title="タスクを追加 (Q)"
+      >
+        <span class="w-5 h-5 rounded-full bg-info-foreground/20 flex items-center justify-center">＋</span>
+        <span class="flex-1 text-left">タスク追加</span>
+        <span class="text-xs opacity-70">Q</span>
+      </button>
+      <button
+        class="w-full flex items-center gap-2 px-3 py-2 rounded-md bg-sidebar-accent/40 hover:bg-sidebar-accent/70 transition-colors text-sm"
+        @click="emit('openAiChat')"
+        title="AI に相談"
+      >
+        <span class="text-base">🤖</span>
+        <span class="flex-1 text-left">AI に相談</span>
+      </button>
+      <div class="text-center">
+        <span class="text-xs text-muted-foreground cursor-pointer hover:text-sidebar-foreground" @click="navigate('/')">
+          OmuCycle
+        </span>
+      </div>
+    </div>
+
+    <nav class="flex-1 overflow-y-auto py-2 text-sm">
+      <!-- 個人 -->
+      <div class="px-2 py-1">
         <div
-          v-for="item in personalNavItems"
+          v-for="item in personalItems"
           :key="item.path"
-          class="nav-item"
-          :class="{ active: route.path === item.path || route.path.startsWith(item.path + '/') }"
+          class="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors hover:bg-sidebar-accent/40"
+          :class="{ 'bg-sidebar-accent/60': isActivePath(item.path) }"
           @click="navigate(item.path)"
         >
-          <span class="nav-icon">{{ item.icon }}</span>
-          <span class="nav-label">{{ item.label }}</span>
+          <span class="text-base shrink-0">{{ item.icon }}</span>
+          <span class="flex-1 truncate">{{ item.label }}</span>
+          <span
+            v-if="personalBadge(item.path) > 0"
+            class="text-xs rounded-full bg-info text-info-foreground px-1.5 py-0.5 min-w-[1.25rem] text-center shrink-0"
+          >{{ personalBadge(item.path) }}</span>
         </div>
       </div>
 
-      <div class="nav-divider"></div>
-
-      <!-- グループ一覧 -->
-      <div class="nav-section">
-        <div
-          class="nav-item"
-          :class="{ active: route.path === '/' }"
-          @click="navigate('/')"
-        >
-          <span class="nav-icon">📁</span>
-          <span class="nav-label">グループ一覧</span>
+      <!-- グループ -->
+      <div class="px-2 py-1 mt-3">
+        <div class="flex items-center justify-between px-2 py-1 mb-1">
+          <span class="text-xs text-muted-foreground uppercase tracking-wide font-semibold">グループ</span>
+          <button
+            class="text-xs text-muted-foreground hover:text-sidebar-foreground"
+            title="グループ一覧"
+            @click="navigate('/')"
+          >＋</button>
         </div>
-      </div>
 
-      <!-- グループ内ナビ -->
-      <template v-if="showGroupMenu && groupBasePath">
-        <div class="nav-divider"></div>
-        <div class="nav-section">
-          <div class="nav-section-title">グループメニュー</div>
+        <div v-for="g in groupsStore.myGroups" :key="g.id" class="mb-1">
           <div
-            v-for="item in groupNavItems"
-            :key="item.path"
-            class="nav-item"
-            :class="{ active: isActive(item) }"
-            @click="navigate(item.path)"
+            class="flex items-center gap-1 pl-1 pr-2 py-1.5 rounded cursor-pointer transition-colors hover:bg-sidebar-accent/40"
+            :class="{ 'bg-sidebar-accent/60': isActivePath(`/${g.slug}`, true) }"
           >
-            <span class="nav-icon">{{ item.icon }}</span>
-            <span class="nav-label">{{ item.label }}</span>
+            <button
+              class="text-xs text-muted-foreground hover:text-sidebar-foreground w-4 shrink-0"
+              @click.stop="toggleGroup(g)"
+            >{{ expandedGroups.has(g.id) ? '▾' : '▸' }}</button>
+            <button
+              class="flex items-center gap-1.5 flex-1 min-w-0 text-left"
+              @click="navigate(`/${g.slug || g.id}`)"
+            >
+              <span class="text-muted-foreground shrink-0">#</span>
+              <span class="truncate">{{ g.name }}</span>
+            </button>
+            <span
+              v-if="(g.my_active_tasks ?? 0) > 0"
+              class="text-xs rounded-full bg-info text-info-foreground px-1.5 py-0.5 min-w-[1.25rem] text-center shrink-0"
+            >{{ g.my_active_tasks }}</span>
+            <span
+              v-if="(g.unread_count ?? 0) > 0"
+              class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"
+              title="未読あり"
+            ></span>
+          </div>
+
+          <!-- 機能セクション -->
+          <div v-if="expandedGroups.has(g.id)" class="ml-5 mt-0.5 mb-1 pl-2 border-l border-sidebar-accent/40">
+            <div
+              v-for="item in groupSections(g.slug || '')"
+              :key="item.path"
+              class="flex items-center gap-2 px-2 py-1 rounded cursor-pointer hover:bg-sidebar-accent/40 text-sm"
+              :class="{
+                'bg-sidebar-accent/60': isActivePath(item.path),
+                'opacity-50': item.comingSoon,
+              }"
+              @click="!item.comingSoon && navigate(item.path)"
+              :title="item.comingSoon ? '近日対応' : ''"
+            >
+              <span class="shrink-0 text-sm">{{ item.icon }}</span>
+              <span class="flex-1 truncate">{{ item.label }}</span>
+              <span v-if="item.comingSoon" class="text-xs text-muted-foreground">soon</span>
+            </div>
+
+            <!-- プロジェクト一覧 -->
+            <div v-if="(groupProjectsCache[g.id] || []).length > 0" class="mt-2 mb-0.5">
+              <div class="text-xs text-muted-foreground px-2 py-0.5 uppercase tracking-wide">プロジェクト</div>
+              <div
+                v-for="p in groupProjectsCache[g.id]"
+                :key="p.id"
+                class="flex items-center gap-2 px-2 py-1 rounded cursor-pointer hover:bg-sidebar-accent/40 text-sm"
+                :class="{ 'bg-sidebar-accent/60': currentGroupSlug === g.slug && currentProjectSlug === p.slug }"
+                @click="navigate(`/${g.slug}/${p.slug}`)"
+              >
+                <span class="shrink-0">{{ p.icon || '·' }}</span>
+                <span class="truncate flex-1">{{ p.name }}</span>
+                <span
+                  v-if="(p.active_tasks ?? 0) > 0"
+                  class="text-xs text-muted-foreground shrink-0"
+                >{{ p.active_tasks }}</span>
+              </div>
+            </div>
           </div>
         </div>
-      </template>
+      </div>
     </nav>
+
+    <!-- 底: ユーザーメニュー -->
+    <div class="border-t border-sidebar-accent/40 p-2 relative">
+      <button
+        v-if="userStore.currentUser"
+        class="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-sidebar-accent/40"
+        @click="userMenuOpen = !userMenuOpen"
+      >
+        <span class="w-7 h-7 rounded-full bg-info flex items-center justify-center text-info-foreground text-sm font-semibold shrink-0">
+          {{ userInitial }}
+        </span>
+        <div class="flex-1 min-w-0 text-left">
+          <div class="text-sm truncate">{{ userStore.currentUser.name }}</div>
+          <div class="text-xs text-muted-foreground truncate">{{ userStore.currentUser.email }}</div>
+        </div>
+      </button>
+
+      <div
+        v-if="userMenuOpen"
+        class="absolute left-2 right-2 bottom-full mb-1 bg-card border border-border rounded-md shadow-lg py-1 z-30"
+        @click.stop
+      >
+        <button
+          class="w-full text-left px-3 py-1.5 text-sm hover:bg-muted flex items-center gap-2 text-foreground"
+          @click="userMenuOpen = false; navigate('/settings')"
+        >
+          <span>⚙️</span>
+          <span>設定</span>
+        </button>
+      </div>
+
+      <div v-if="userMenuOpen" class="fixed inset-0 z-20" @click="userMenuOpen = false"></div>
+    </div>
   </aside>
 </template>
-
-<style scoped>
-.app-sidebar {
-  width: 220px;
-  background: #16213e;
-  color: #ccc;
-  padding: 1rem 0;
-  flex-shrink: 0;
-}
-
-.sidebar-nav {
-  display: flex;
-  flex-direction: column;
-}
-
-.nav-section {
-  padding: 0 0.5rem;
-}
-
-.nav-section-title {
-  font-size: 0.75rem;
-  color: #666;
-  padding: 0.5rem 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.nav-item {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.625rem 0.75rem;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.nav-item:hover {
-  background: rgba(255, 255, 255, 0.1);
-}
-
-.nav-item.active {
-  background: #4cc9f0;
-  color: #1a1a2e;
-}
-
-.nav-icon {
-  font-size: 1rem;
-}
-
-.nav-label {
-  font-size: 0.875rem;
-}
-
-.nav-divider {
-  height: 1px;
-  background: rgba(255, 255, 255, 0.1);
-  margin: 0.75rem 0;
-}
-</style>

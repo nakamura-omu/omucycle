@@ -3,8 +3,9 @@ import { onMounted, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useGroupsStore } from '@/stores/groups'
 import GroupBasicSettings from '@/components/settings/GroupBasicSettings.vue'
-import GroupStatusSettings from '@/components/settings/GroupStatusSettings.vue'
 import GroupMemberSettings from '@/components/settings/GroupMemberSettings.vue'
+import PageContainer from '@/components/layout/PageContainer.vue'
+import PageHeader from '@/components/layout/PageHeader.vue'
 
 const route = useRoute()
 const groupsStore = useGroupsStore()
@@ -27,8 +28,8 @@ async function handleMembersChanged() {
 </script>
 
 <template>
-  <div class="settings-page">
-    <h2>グループ設定</h2>
+  <PageContainer narrow>
+    <PageHeader title="グループ設定" />
 
     <GroupBasicSettings
       :group="groupsStore.currentGroup"
@@ -36,27 +37,10 @@ async function handleMembersChanged() {
       @updated="handleGroupUpdated"
     />
 
-    <GroupStatusSettings
-      :group-id="resolvedGroupId"
-    />
-
     <GroupMemberSettings
       :group-id="resolvedGroupId"
       :members="groupsStore.members"
       @members-changed="handleMembersChanged"
     />
-  </div>
+  </PageContainer>
 </template>
-
-<style scoped>
-.settings-page {
-  max-width: 800px;
-  margin: 0 auto;
-}
-
-.settings-page h2 {
-  font-size: 1.25rem;
-  color: #1a1a2e;
-  margin: 0 0 1.5rem 0;
-}
-</style>

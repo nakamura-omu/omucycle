@@ -1,52 +1,14 @@
 <script setup lang="ts">
+import { Badge } from '@/components/ui/badge'
 </script>
 
 <template>
-  <div class="placeholder-page">
-    <div class="placeholder-content">
-      <span class="placeholder-icon">📅</span>
-      <h2>マイカレンダー</h2>
-      <p>全グループの業務を重ね表示・フィルタ切替できます</p>
-      <span class="coming-soon">Coming Soon</span>
+  <div class="flex items-center justify-center min-h-[400px]">
+    <div class="text-center text-muted-foreground">
+      <span class="text-5xl block mb-4">📅</span>
+      <h2 class="mb-2 text-foreground text-lg font-semibold">マイカレンダー</h2>
+      <p class="mb-4">全グループの業務を重ね表示・フィルタ切替できます</p>
+      <Badge variant="secondary" class="uppercase tracking-wide">Coming Soon</Badge>
     </div>
   </div>
 </template>
-
-<style scoped>
-.placeholder-page {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 400px;
-}
-
-.placeholder-content {
-  text-align: center;
-  color: #666;
-}
-
-.placeholder-icon {
-  font-size: 3rem;
-  display: block;
-  margin-bottom: 1rem;
-}
-
-.placeholder-content h2 {
-  margin: 0 0 0.5rem 0;
-  color: #1a1a2e;
-}
-
-.placeholder-content p {
-  margin: 0 0 1rem 0;
-}
-
-.coming-soon {
-  display: inline-block;
-  padding: 0.25rem 0.75rem;
-  background: #e0e0e0;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-</style>

@@ -37,3 +37,6 @@ data/
 # Dev server management
 .pids/
 .logs/
+.env.production
+.env.*
+!.env.example

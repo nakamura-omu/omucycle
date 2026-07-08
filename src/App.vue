@@ -1,10 +1,15 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useUserStore } from '@/stores/user'
-import AppHeader from '@/components/AppHeader.vue'
 import AppSidebar from '@/components/AppSidebar.vue'
+import TaskDetailPanel from '@/components/task/TaskDetailPanel.vue'
+import QuickAddTaskDialog from '@/components/task/QuickAddTaskDialog.vue'
+import AiChatPanel from '@/components/ai/AiChatPanel.vue'
+import { useAiChatStore } from '@/stores/aiChat'
 
 const userStore = useUserStore()
+const aiStore = useAiChatStore()
+const showQuickAdd = ref(false)
 
 onMounted(() => {
   userStore.fetchCurrentUser()
@@ -12,33 +17,18 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="app-container">
-    <AppHeader />
-    <div class="app-main">
-      <AppSidebar />
-      <main class="app-content">
+  <div class="h-screen flex">
+    <AppSidebar
+      @open-quick-add="showQuickAdd = true"
+      @open-ai-chat="aiStore.open()"
+    />
+    <main class="flex-1 bg-muted/50 overflow-y-auto">
+      <div class="p-6">
         <router-view />
-      </main>
-    </div>
+      </div>
+    </main>
+    <TaskDetailPanel />
+    <QuickAddTaskDialog v-model="showQuickAdd" />
+    <AiChatPanel />
   </div>
 </template>
-
-<style scoped>
-.app-container {
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-}
-
-.app-main {
-  flex: 1;
-  display: flex;
-}
-
-.app-content {
-  flex: 1;
-  padding: 1.5rem;
-  background: #f5f5f5;
-  overflow-y: auto;
-}
-</style>

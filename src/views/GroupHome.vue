@@ -2,53 +2,29 @@
 import { onMounted, watch, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useGroupsStore } from '@/stores/groups'
+import { useProjectsStore } from '@/stores/projects'
 
 const route = useRoute()
 const groupsStore = useGroupsStore()
+const projectsStore = useProjectsStore()
 
-// groupIdまたはgroupSlugを取得
-const groupId = computed(() => route.params.groupId as string | undefined)
-const groupSlug = computed(() => route.params.groupSlug as string | undefined)
+const groupSlug = computed(() => route.params.groupSlug as string)
 
 async function loadGroup() {
-  if (groupId.value) {
-    await groupsStore.fetchGroup(groupId.value)
-  } else if (groupSlug.value) {
+  if (groupSlug.value && (!groupsStore.currentGroup || groupsStore.currentGroup.slug !== groupSlug.value)) {
     await groupsStore.fetchGroupBySlug(groupSlug.value)
+  }
+  if (groupsStore.currentGroup?.id) {
+    await projectsStore.fetchGroupProjects(groupsStore.currentGroup.id)
   }
 }
 
-onMounted(() => {
-  loadGroup()
-})
-
-watch([groupId, groupSlug], () => {
-  loadGroup()
-})
+onMounted(loadGroup)
+watch(groupSlug, loadGroup)
 </script>
 
 <template>
-  <div class="group-home">
-    <div v-if="groupsStore.currentGroup" class="group-header">
-      <h1>{{ groupsStore.currentGroup.name }}</h1>
-    </div>
+  <div class="mx-auto max-w-[1280px]">
     <router-view />
   </div>
 </template>
-
-<style scoped>
-.group-home {
-  max-width: 1200px;
-  margin: 0 auto;
-}
-
-.group-header {
-  margin-bottom: 1.5rem;
-}
-
-.group-header h1 {
-  font-size: 1.5rem;
-  color: #1a1a2e;
-  margin: 0;
-}
-</style>

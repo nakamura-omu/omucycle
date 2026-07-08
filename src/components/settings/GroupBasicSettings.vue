@@ -1,6 +1,11 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { api } from '@/lib/api'
 
 const props = defineProps<{
   group: {
@@ -16,6 +21,7 @@ const emit = defineEmits<{
 }>()
 
 const router = useRouter()
+const origin = computed(() => typeof window !== 'undefined' ? window.location.origin : '')
 
 const groupSettings = ref({
   name: '',
@@ -51,7 +57,7 @@ async function saveSettings() {
   slugError.value = ''
 
   try {
-    const res = await fetch(`/api/groups/${props.group?.id}`, {
+    const res = await api(`/api/groups/${props.group?.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -88,176 +94,62 @@ function cancelEdit() {
 </script>
 
 <template>
-  <section class="settings-section">
-    <div class="section-header">
-      <h3>基本設定</h3>
-      <div class="section-actions">
-        <button
+  <Card class="mb-6">
+    <CardHeader class="flex flex-row items-center justify-between space-y-0 pb-4">
+      <CardTitle class="text-base">基本設定</CardTitle>
+      <div class="flex gap-2">
+        <Button
           v-if="!isEditing"
-          class="btn btn-secondary"
+          variant="secondary"
+          size="sm"
           @click="isEditing = true"
         >
           編集
-        </button>
+        </Button>
         <template v-else>
-          <button class="btn btn-secondary" @click="cancelEdit">
+          <Button variant="secondary" size="sm" @click="cancelEdit">
             キャンセル
-          </button>
-          <button class="btn btn-primary" @click="saveSettings">
+          </Button>
+          <Button size="sm" @click="saveSettings">
             保存
-          </button>
+          </Button>
         </template>
       </div>
-    </div>
-
-    <div class="settings-form">
-      <div class="form-group">
-        <label>グループ名</label>
-        <input
+    </CardHeader>
+    <CardContent class="space-y-4">
+      <div class="space-y-1.5">
+        <Label>グループ名</Label>
+        <Input
           v-if="isEditing"
           v-model="groupSettings.name"
-          type="text"
           placeholder="グループ名"
         />
-        <span v-else class="form-value">{{ group?.name }}</span>
+        <span v-else class="text-sm text-foreground">{{ group?.name }}</span>
       </div>
 
-      <div class="form-group">
-        <label>URL スラッグ</label>
-        <div v-if="isEditing" class="slug-input-wrapper">
-          <span class="slug-prefix">{{ window.location.origin }}/</span>
-          <input
+      <div class="space-y-1.5">
+        <Label>URL スラッグ</Label>
+        <div v-if="isEditing" class="flex items-center">
+          <span class="text-sm text-muted-foreground bg-muted px-2 py-2 border border-r-0 border-input rounded-l-md">
+            {{ origin }}/
+          </span>
+          <Input
             v-model="groupSettings.slug"
-            type="text"
             placeholder="dx-suishin"
-            class="slug-input"
+            class="rounded-l-none"
           />
         </div>
-        <span v-else class="form-value">
+        <span v-else class="text-sm text-foreground">
           <template v-if="group?.slug">
-            {{ window.location.origin }}/{{ group.slug }}
+            {{ origin }}/{{ group.slug }}
           </template>
           <template v-else>
-            <span class="text-muted">未設定</span>
+            <span class="italic text-muted-foreground">未設定</span>
           </template>
         </span>
-        <p v-if="slugError" class="error-text">{{ slugError }}</p>
-        <p class="help-text">英小文字、数字、ハイフンが使えます（例: dx-suishin）</p>
+        <p v-if="slugError" class="text-xs text-destructive mt-1">{{ slugError }}</p>
+        <p class="text-xs text-muted-foreground mt-1">英小文字、数字、ハイフンが使えます（例: dx-suishin）</p>
       </div>
-    </div>
-  </section>
+    </CardContent>
+  </Card>
 </template>
-
-<style scoped>
-.settings-section {
-  background: white;
-  border-radius: 12px;
-  padding: 1.25rem;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-  margin-bottom: 1.5rem;
-}
-
-.section-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 1rem;
-}
-
-.section-header h3 {
-  font-size: 1rem;
-  color: #1a1a2e;
-  margin: 0;
-}
-
-.section-actions {
-  display: flex;
-  gap: 0.5rem;
-}
-
-.settings-form {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-
-.form-group {
-  margin-bottom: 0;
-}
-
-.form-group label {
-  display: block;
-  font-size: 0.875rem;
-  font-weight: 500;
-  margin-bottom: 0.5rem;
-}
-
-.form-group input {
-  width: 100%;
-  padding: 0.625rem;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  font-size: 0.875rem;
-}
-
-.form-value {
-  font-size: 0.875rem;
-  color: #333;
-}
-
-.slug-input-wrapper {
-  display: flex;
-  align-items: center;
-}
-
-.slug-prefix {
-  font-size: 0.875rem;
-  color: #666;
-  background: #f5f5f5;
-  padding: 0.625rem 0.5rem;
-  border: 1px solid #ddd;
-  border-right: none;
-  border-radius: 6px 0 0 6px;
-}
-
-.slug-input {
-  flex: 1;
-  border-radius: 0 6px 6px 0 !important;
-}
-
-.help-text {
-  font-size: 0.75rem;
-  color: #666;
-  margin: 0.25rem 0 0 0;
-}
-
-.error-text {
-  font-size: 0.75rem;
-  color: #dc2626;
-  margin: 0.25rem 0 0 0;
-}
-
-.text-muted {
-  color: #999;
-  font-style: italic;
-}
-
-.btn {
-  padding: 0.5rem 1rem;
-  border-radius: 6px;
-  font-size: 0.875rem;
-  font-weight: 500;
-  cursor: pointer;
-  border: none;
-}
-
-.btn-primary {
-  background: #4cc9f0;
-  color: #1a1a2e;
-}
-
-.btn-secondary {
-  background: #e0e0e0;
-  color: #333;
-}
-</style>

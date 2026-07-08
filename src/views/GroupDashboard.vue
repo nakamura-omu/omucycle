@@ -1,13 +1,25 @@
 <script setup lang="ts">
-import { onMounted, computed, ref } from 'vue'
+import { onMounted, computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useTasksStore } from '@/stores/tasks'
+import { api } from '@/lib/api'
+import { useGroupsStore } from '@/stores/groups'
+import { useProjectsStore } from '@/stores/projects'
+import { useTasksStore, type Task } from '@/stores/tasks'
+import { useUserStore } from '@/stores/user'
+import { useTaskPanelStore } from '@/stores/taskPanel'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
 
 const route = useRoute()
 const router = useRouter()
+const groupsStore = useGroupsStore()
+const projectsStore = useProjectsStore()
 const tasksStore = useTasksStore()
+const userStore = useUserStore()
+const taskPanelStore = useTaskPanelStore()
 
-const groupId = computed(() => route.params.groupId as string)
+const groupSlug = computed(() => route.params.groupSlug as string)
+const groupId = computed(() => groupsStore.currentGroup?.id || '')
 
 interface HistoryEntry {
   id: string
@@ -15,353 +27,189 @@ interface HistoryEntry {
   user_name: string
   task_title: string
   task_number: number | null
-  action_type: string
   field_name: string | null
-  old_value: string | null
-  new_value: string | null
   created_at: string
 }
-
 const history = ref<HistoryEntry[]>([])
-const isLoadingHistory = ref(false)
 
-const urgentTasks = computed(() =>
-  tasksStore.tasks
-    .filter(t => t.status !== 'completed' && t.priority === 'urgent')
-    .slice(0, 5)
-)
+async function load() {
+  if (!groupsStore.currentGroup || groupsStore.currentGroup.slug !== groupSlug.value) {
+    await groupsStore.fetchGroupBySlug(groupSlug.value)
+  }
+  if (!groupId.value) return
+  const [_, hres] = await Promise.all([
+    Promise.all([
+      tasksStore.fetchGroupTasks(groupId.value),
+      projectsStore.fetchGroupProjects(groupId.value),
+    ]),
+    api(`/api/groups/${groupId.value}/history?limit=8`),
+  ])
+  if (hres.ok) history.value = await hres.json()
+}
 
-const upcomingTasks = computed(() =>
-  tasksStore.tasks
-    .filter(t => t.status !== 'completed' && t.due_date)
-    .sort((a, b) => (a.due_date || '').localeCompare(b.due_date || ''))
-    .slice(0, 5)
-)
+onMounted(load)
+watch(groupSlug, load)
 
-async function fetchHistory() {
-  isLoadingHistory.value = true
-  try {
-    const res = await fetch(`/api/groups/${groupId.value}/history?limit=10`)
-    if (res.ok) {
-      history.value = await res.json()
+const myTasks = computed(() => {
+  if (!userStore.currentUser?.id) return []
+  const me = userStore.currentUser.id
+  return tasksStore.tasks.filter(t => {
+    if (t.status === 'completed') return false
+    if (t.assignee_id === me) return true
+    if (Array.isArray(t.assignee_ids)) return t.assignee_ids.includes(me)
+    if (typeof t.assignee_ids === 'string') {
+      try { return JSON.parse(t.assignee_ids).includes(me) } catch { return false }
     }
-  } catch (error) {
-    console.error('Failed to fetch history:', error)
-  } finally {
-    isLoadingHistory.value = false
-  }
-}
-
-function getFieldLabel(field: string): string {
-  const labels: Record<string, string> = {
-    status: 'ステータス',
-    priority: '優先度',
-    title: 'タイトル',
-    description: '説明',
-    assignee_id: '担当者',
-    assignee_ids: '担当者',
-    start_date: '開始日',
-    due_date: '期限日',
-  }
-  return labels[field] || field
-}
-
-function formatHistoryTime(dateStr: string): string {
-  const date = new Date(dateStr)
-  const now = new Date()
-  const diffMs = now.getTime() - date.getTime()
-  const diffMins = Math.floor(diffMs / 60000)
-  const diffHours = Math.floor(diffMs / 3600000)
-  const diffDays = Math.floor(diffMs / 86400000)
-
-  if (diffMins < 1) return 'たった今'
-  if (diffMins < 60) return `${diffMins}分前`
-  if (diffHours < 24) return `${diffHours}時間前`
-  if (diffDays < 7) return `${diffDays}日前`
-  return date.toLocaleDateString('ja-JP')
-}
-
-onMounted(() => {
-  tasksStore.fetchGroupTasks(groupId.value)
-  fetchHistory()
+    return false
+  }).slice(0, 5)
 })
 
-function goToTask(taskId: string) {
-  router.push(`/groups/${groupId.value}/tasks/${taskId}`)
+const stats = computed(() => {
+  const total = tasksStore.tasks.length
+  const completed = tasksStore.tasksByStatus.completed.length
+  const inProgress = tasksStore.tasksByStatus.in_progress.length
+  return { total, completed, inProgress, notStarted: tasksStore.tasksByStatus.not_started.length }
+})
+
+function formatHistoryTime(s: string) {
+  const d = new Date(s.replace(' ', 'T') + (s.includes('T') ? '' : 'Z'))
+  const diff = (Date.now() - d.getTime()) / 60000
+  if (diff < 1) return 'たった今'
+  if (diff < 60) return `${Math.floor(diff)}分前`
+  if (diff < 1440) return `${Math.floor(diff / 60)}時間前`
+  return d.toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })
 }
 
-function formatDate(dateStr: string | null) {
-  if (!dateStr) return ''
-  return new Date(dateStr).toLocaleDateString('ja-JP', {
-    month: 'short',
-    day: 'numeric',
-  })
+function go(path: string) {
+  router.push(`/${groupSlug.value}${path}`)
 }
 
-const priorityColors: Record<string, string> = {
-  urgent: '#ef4444',
-  important: '#f59e0b',
-  normal: '#6b7280',
-  none: '#d1d5db',
+function openTask(t: Task) {
+  if (t.project_slug) {
+    taskPanelStore.open({
+      groupSlug: groupSlug.value,
+      projectSlug: t.project_slug,
+      taskId: t.id,
+      taskNumber: t.task_number,
+    })
+  }
 }
 </script>
 
 <template>
-  <div class="dashboard">
-    <div class="dashboard-grid">
-      <!-- 緊急タスク -->
-      <div class="dashboard-card">
-        <h3>🔴 緊急タスク</h3>
-        <div v-if="urgentTasks.length === 0" class="empty-state">
-          緊急タスクはありません
-        </div>
-        <div v-else class="task-list">
-          <div
-            v-for="task in urgentTasks"
-            :key="task.id"
-            class="task-item"
-            @click="goToTask(task.id)"
-          >
-            <span class="task-title">{{ task.title }}</span>
-            <span class="task-due">{{ formatDate(task.due_date) }}</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- 期限が近いタスク -->
-      <div class="dashboard-card">
-        <h3>📅 期限が近いタスク</h3>
-        <div v-if="upcomingTasks.length === 0" class="empty-state">
-          期限が設定されたタスクはありません
-        </div>
-        <div v-else class="task-list">
-          <div
-            v-for="task in upcomingTasks"
-            :key="task.id"
-            class="task-item"
-            @click="goToTask(task.id)"
-          >
-            <span
-              class="priority-dot"
-              :style="{ background: priorityColors[task.priority] }"
-            ></span>
-            <span class="task-title">{{ task.title }}</span>
-            <span class="task-due">{{ formatDate(task.due_date) }}</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- 統計 -->
-      <div class="dashboard-card stats-card">
-        <h3>📊 統計</h3>
-        <div class="stats-grid">
-          <div class="stat-item">
-            <span class="stat-value">{{ tasksStore.tasksByStatus.not_started.length }}</span>
-            <span class="stat-label">未着手</span>
-          </div>
-          <div class="stat-item">
-            <span class="stat-value">{{ tasksStore.tasksByStatus.in_progress.length }}</span>
-            <span class="stat-label">進行中</span>
-          </div>
-          <div class="stat-item">
-            <span class="stat-value">{{ tasksStore.tasksByStatus.completed.length }}</span>
-            <span class="stat-label">完了</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- 最近の履歴 -->
-      <div class="dashboard-card history-card">
-        <h3>📝 最近の履歴</h3>
-        <div v-if="isLoadingHistory" class="empty-state">読み込み中...</div>
-        <div v-else-if="history.length === 0" class="empty-state">
-          履歴はありません
-        </div>
-        <div v-else class="history-list">
-          <div
-            v-for="entry in history"
-            :key="entry.id"
-            class="history-item"
-          >
-            <div class="history-main">
-              <span class="history-user">{{ entry.user_name }}</span>
-              が
-              <span class="history-task" @click="goToTask(entry.task_id)">
-                #{{ entry.task_number || '-' }} {{ entry.task_title }}
-              </span>
-              の
-              <span class="history-field">{{ getFieldLabel(entry.field_name || '') }}</span>
-              を変更
-            </div>
-            <div class="history-time">{{ formatHistoryTime(entry.created_at) }}</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- ファイル -->
-      <div class="dashboard-card files-card">
-        <h3>📁 ファイル</h3>
-        <div class="coming-soon">
-          <span class="coming-soon-icon">🚧</span>
-          <span>Coming Soon</span>
-        </div>
+  <div class="space-y-6">
+    <!-- ハブヘッダー -->
+    <div class="flex items-center justify-between">
+      <div>
+        <h2 class="text-xl font-bold">{{ groupsStore.currentGroup?.name || 'グループ' }}</h2>
+        <p class="text-sm text-muted-foreground mt-1">ここで何ができるか、ざっと見てみよう</p>
       </div>
     </div>
+
+    <!-- 機能セクション（ハブ） -->
+    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+      <button class="text-left rounded-lg border border-border bg-card hover:shadow-md transition-shadow p-4 flex flex-col gap-1" @click="go('/tasks')">
+        <span class="text-2xl">📋</span>
+        <span class="text-base font-semibold">タスク</span>
+        <span class="text-xs text-muted-foreground">やること一覧 / 追加</span>
+      </button>
+      <button class="text-left rounded-lg border border-border bg-card hover:shadow-md transition-shadow p-4 flex flex-col gap-1" @click="go('/atlas')">
+        <span class="text-2xl">🗺️</span>
+        <span class="text-base font-semibold">アトラス</span>
+        <span class="text-xs text-muted-foreground">全体図でアイデアと整理</span>
+      </button>
+      <button class="text-left rounded-lg border border-border bg-card hover:shadow-md transition-shadow p-4 flex flex-col gap-1" @click="go('/wiki')">
+        <span class="text-2xl">📖</span>
+        <span class="text-base font-semibold">Wiki</span>
+        <span class="text-xs text-muted-foreground">知識を共有する</span>
+      </button>
+      <button class="text-left rounded-lg border border-border bg-card opacity-60 transition-shadow p-4 flex flex-col gap-1 cursor-not-allowed" :title="'近日対応'">
+        <span class="text-2xl">📁</span>
+        <span class="text-base font-semibold">ファイル</span>
+        <span class="text-xs text-muted-foreground">近日対応</span>
+      </button>
+      <button class="text-left rounded-lg border border-border bg-card hover:shadow-md transition-shadow p-4 flex flex-col gap-1" @click="go('/cycles')">
+        <span class="text-2xl">🔁</span>
+        <span class="text-base font-semibold">サイクル</span>
+        <span class="text-xs text-muted-foreground">時間のリズム</span>
+      </button>
+    </div>
+
+    <!-- 自分宛タスク + 統計 + 最近の履歴 -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <Card class="md:col-span-2">
+        <CardHeader class="pb-2 flex flex-row items-center justify-between">
+          <CardTitle class="text-base">📌 自分宛のタスク</CardTitle>
+          <Button variant="ghost" size="sm" @click="go('/tasks')">全部見る →</Button>
+        </CardHeader>
+        <CardContent>
+          <div v-if="myTasks.length === 0" class="text-sm text-muted-foreground py-6 text-center">
+            自分に割り当てられたタスクはありません 🎉
+          </div>
+          <div v-else class="space-y-1">
+            <div
+              v-for="t in myTasks"
+              :key="t.id"
+              class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted/50 cursor-pointer text-sm"
+              @click="openTask(t)"
+            >
+              <span class="w-2 h-2 rounded-full shrink-0" :class="t.status === 'in_progress' ? 'bg-info' : 'bg-muted-foreground'"></span>
+              <span class="flex-1 truncate">{{ t.title }}</span>
+              <span v-if="t.due_date" class="text-xs text-muted-foreground shrink-0">{{ t.due_date }}</span>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader class="pb-2">
+          <CardTitle class="text-base">📊 グループ全体</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div class="grid grid-cols-3 gap-2 text-center">
+            <div>
+              <div class="text-2xl font-bold">{{ stats.notStarted }}</div>
+              <div class="text-xs text-muted-foreground">未着手</div>
+            </div>
+            <div>
+              <div class="text-2xl font-bold text-info">{{ stats.inProgress }}</div>
+              <div class="text-xs text-muted-foreground">進行中</div>
+            </div>
+            <div>
+              <div class="text-2xl font-bold text-success">{{ stats.completed }}</div>
+              <div class="text-xs text-muted-foreground">完了</div>
+            </div>
+          </div>
+          <div class="mt-3 text-xs text-muted-foreground">
+            プロジェクト数: {{ projectsStore.projects.length }}
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+
+    <!-- 最近の動き -->
+    <Card>
+      <CardHeader class="pb-2">
+        <CardTitle class="text-base">📝 最近の動き</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div v-if="history.length === 0" class="text-sm text-muted-foreground text-center py-4">
+          まだ履歴はありません
+        </div>
+        <div v-else class="space-y-1">
+          <div
+            v-for="h in history"
+            :key="h.id"
+            class="flex items-center gap-2 px-2 py-1 text-sm"
+          >
+            <span class="text-muted-foreground shrink-0">{{ formatHistoryTime(h.created_at) }}</span>
+            <span class="text-foreground">{{ h.user_name }}</span>
+            <span class="text-muted-foreground">が</span>
+            <span class="text-info truncate">{{ h.task_title }}</span>
+            <span class="text-muted-foreground">を更新</span>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   </div>
 </template>
-
-<style scoped>
-.dashboard {
-  padding: 0;
-}
-
-.dashboard-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 1.5rem;
-}
-
-.dashboard-card {
-  background: white;
-  border-radius: 12px;
-  padding: 1.25rem;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-}
-
-.dashboard-card h3 {
-  font-size: 1rem;
-  color: #1a1a2e;
-  margin: 0 0 1rem 0;
-}
-
-.task-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-.task-item {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.625rem;
-  background: #f8f9fa;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.task-item:hover {
-  background: #e9ecef;
-}
-
-.priority-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.task-title {
-  flex: 1;
-  font-size: 0.875rem;
-  color: #333;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.task-due {
-  font-size: 0.75rem;
-  color: #666;
-  flex-shrink: 0;
-}
-
-.empty-state {
-  color: #999;
-  font-size: 0.875rem;
-  text-align: center;
-  padding: 1rem;
-}
-
-.stats-card .stats-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 1rem;
-}
-
-.stat-item {
-  text-align: center;
-}
-
-.stat-value {
-  display: block;
-  font-size: 1.5rem;
-  font-weight: 700;
-  color: #1a1a2e;
-}
-
-.stat-label {
-  font-size: 0.75rem;
-  color: #666;
-}
-
-/* 履歴 */
-.history-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-.history-item {
-  padding: 0.5rem 0.625rem;
-  background: #fefce8;
-  border-radius: 6px;
-  border-left: 3px solid #facc15;
-}
-
-.history-main {
-  font-size: 0.8125rem;
-  color: #666;
-  line-height: 1.5;
-}
-
-.history-user {
-  font-weight: 600;
-  color: #1a1a2e;
-}
-
-.history-task {
-  color: #4338ca;
-  cursor: pointer;
-}
-
-.history-task:hover {
-  text-decoration: underline;
-}
-
-.history-field {
-  color: #059669;
-}
-
-.history-time {
-  font-size: 0.7rem;
-  color: #999;
-  margin-top: 0.25rem;
-}
-
-/* Coming Soon */
-.coming-soon {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 2rem;
-  color: #999;
-  gap: 0.5rem;
-}
-
-.coming-soon-icon {
-  font-size: 2rem;
-}
-</style>
