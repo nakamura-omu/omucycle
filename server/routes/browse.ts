@@ -48,7 +48,7 @@ browseRoutes.get('/:groupSlug/projects/:projectSlug/tasks/:taskNumber{[0-9]+}', 
   if (!project) return c.json({ error: 'Project not found' }, 404);
 
   const task = db.prepare(`
-    SELECT t.*, u.name as assignee_name, creator.name as created_by_name,
+    SELECT t.*, u.name as assignee_name, u.omuid as assignee_omuid, creator.name as created_by_name,
            p.name as project_name, p.slug as project_slug, p.prefix as project_prefix,
            g.name as group_name, g.slug as group_slug,
            c.name as cycle_name, c.cycle_number
@@ -63,7 +63,7 @@ browseRoutes.get('/:groupSlug/projects/:projectSlug/tasks/:taskNumber{[0-9]+}', 
   if (!task) return c.json({ error: 'Task not found' }, 404);
 
   const children = db.prepare(`
-    SELECT t.*, u.name as assignee_name
+    SELECT t.*, u.name as assignee_name, u.omuid as assignee_omuid
     FROM tasks t
     LEFT JOIN users u ON t.assignee_id = u.id
     WHERE t.parent_task_id = ?

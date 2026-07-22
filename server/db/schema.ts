@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   email TEXT UNIQUE NOT NULL,
   name TEXT NOT NULL,
+  omuid TEXT,  -- Directory正典IDへのポインタ（氏名・所属はコピーしない。OMU365原則1）
   auth_type TEXT CHECK(auth_type IN ('sso', 'guest')) NOT NULL DEFAULT 'guest',
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
@@ -16,6 +17,7 @@ CREATE TABLE IF NOT EXISTS groups (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   slug TEXT UNIQUE,
+  is_personal INTEGER DEFAULT 0,
   created_by TEXT NOT NULL REFERENCES users(id),
   invite_token TEXT,
   invite_password TEXT,
@@ -98,6 +100,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   description TEXT,
   start_date TEXT,
   due_date TEXT,
+  due_time TEXT,  -- HH:MM。時刻付き期限（M365カレンダー連携用）
   status TEXT CHECK(status IN ('not_started','in_progress','completed')) NOT NULL DEFAULT 'not_started',
   priority TEXT CHECK(priority IN ('urgent','important','normal','none')) DEFAULT 'normal',
   assignee_id TEXT REFERENCES users(id) ON DELETE SET NULL,

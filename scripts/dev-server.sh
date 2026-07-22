@@ -73,7 +73,7 @@ status() {
     echo "=== OmuCycle Dev Servers ==="
 
     if [ -f "$API_PID_FILE" ] && kill -0 "$(cat "$API_PID_FILE")" 2>/dev/null; then
-        echo "API:      Running (PID: $(cat "$API_PID_FILE"), port 3180)"
+        echo "API:      Running (PID: $(cat "$API_PID_FILE"), port 3260)"
     else
         echo "API:      Stopped"
     fi

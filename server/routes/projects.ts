@@ -26,6 +26,23 @@ projectsRoutes.post('/groups/:groupId/ensure-inbox', (c) => {
   return c.json(db.prepare('SELECT * FROM projects WHERE id = ?').get(id), 201);
 });
 
+// プロジェクトの並び替え（サイドバーD&D）。sort_order をバルク更新
+projectsRoutes.post('/reorder-bulk', async (c) => {
+  const db = getDb();
+  const body = await c.req.json();
+  const { projects } = body;
+  if (!Array.isArray(projects) || projects.length === 0) {
+    return c.json({ error: 'projects array is required' }, 400);
+  }
+  const stmt = db.prepare(`
+    UPDATE projects SET sort_order = ?, updated_at = datetime('now') WHERE id = ?
+  `);
+  db.transaction(() => {
+    for (const p of projects) stmt.run(p.sort_order ?? 0, p.id);
+  })();
+  return c.json({ success: true, updated: projects.length });
+});
+
 // プロジェクト詳細
 projectsRoutes.get('/:id', (c) => {
   const db = getDb();
@@ -125,7 +142,7 @@ projectsRoutes.get('/:id/tasks', (c) => {
   const noCycle = c.req.query('no_cycle') === 'true';
 
   let query = `
-    SELECT t.*, u.name as assignee_name
+    SELECT t.*, u.name as assignee_name, u.omuid as assignee_omuid
     FROM tasks t
     LEFT JOIN users u ON t.assignee_id = u.id
     WHERE t.project_id = ?

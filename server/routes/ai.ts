@@ -8,6 +8,16 @@ export const aiRoutes = new Hono()
 
 const MODEL = 'claude-sonnet-4-6'
 
+// ── プロバイダ選択 ──
+// OPENAI_API_KEY があれば OpenAI(ChatGPT API)、無ければ Anthropic。
+// AI_PROVIDER=openai|anthropic で明示上書き、OPENAI_MODEL でモデル差し替え可
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5.4-mini'
+function aiProvider(): 'openai' | 'anthropic' {
+  const p = process.env.AI_PROVIDER
+  if (p === 'openai' || p === 'anthropic') return p
+  return process.env.OPENAI_API_KEY ? 'openai' : 'anthropic'
+}
+
 const SYSTEM_PROMPT = `あなたは OmuCycle というタスク・プロジェクト管理システムの中で動く AI アシスタントです。
 
 # ユーザーを助ける形
@@ -171,7 +181,8 @@ async function executeTool(name: string, input: any, userId: string): Promise<an
 
   switch (name) {
     case 'today':
-      return { date: new Date().toISOString().slice(0, 10) }
+      // サーバーはUTCなのでJSTを明示（toISOStringだと朝9時まで前日になる）
+      return { date: new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' }) }
 
     case 'list_groups': {
       const rows = db.prepare(`
@@ -243,7 +254,7 @@ async function executeTool(name: string, input: any, userId: string): Promise<an
 
     case 'get_task': {
       const t = db.prepare(`
-        SELECT t.*, p.name as project_name, u.name as assignee_name
+        SELECT t.*, p.name as project_name, u.name as assignee_name, u.omuid as assignee_omuid
         FROM tasks t
         JOIN projects p ON t.project_id = p.id
         LEFT JOIN users u ON t.assignee_id = u.id
@@ -340,17 +351,150 @@ async function executeTool(name: string, input: any, userId: string): Promise<an
   return { error: 'Unknown tool: ' + name }
 }
 
+// === OpenAI(ChatGPT API)プロバイダ ===
+// SSEイベント(text_start/text_delta/tool_start/tool_input_delta/tool_run/tool_result/done/error)は
+// Anthropic側と同一プロトコルで出す — フロント(AiChatPanel)は無変更で動く
+async function openaiChat(c: any, user: { id: string; name: string }, messages: any[], ctx: any) {
+  const apiKey = process.env.OPENAI_API_KEY
+  if (!apiKey) return c.json({ error: 'OPENAI_API_KEY not set' }, 500)
+
+  const tools = TOOLS.map(t => ({
+    type: 'function' as const,
+    function: { name: t.name, description: t.description, parameters: t.input_schema as any },
+  }))
+
+  return stream(c, async (s) => {
+    s.onAbort(() => { /* client closed */ })
+    const writeEvent = async (event: string, data: any) => {
+      await s.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+    }
+
+    const sysText = SYSTEM_PROMPT +
+      `\n\n# 現在のユーザー\n名前: ${user.name}\nID: ${user.id}` +
+      `\n\n# 現在の画面コンテキスト\n${JSON.stringify(ctx, null, 2)}` +
+      `\n\n# 今日: ${new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' })}`
+    // フロントはテキストのみの履歴を送る（万一ブロックが来ても文字列化して受ける）
+    const conv: any[] = [
+      { role: 'system', content: sysText },
+      ...messages.map((m: any) => ({
+        role: m.role,
+        content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+      })),
+    ]
+
+    let safety = 0
+    while (safety++ < 10) {
+      let res: Response
+      try {
+        res = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: OPENAI_MODEL, messages: conv, tools, stream: true,
+            max_completion_tokens: 4096,
+          }),
+        })
+      } catch (e: any) {
+        await writeEvent('error', { message: String(e?.message || e) }); return
+      }
+      if (!res.ok || !res.body) {
+        await writeEvent('error', { message: `OpenAI ${res.status}: ${(await res.text()).slice(0, 500)}` })
+        return
+      }
+
+      let text = ''
+      let textStarted = false
+      const calls: { id: string; name: string; args: string }[] = []
+      let finish: string | null = null
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      readLoop: while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        let nl: number
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1)
+          if (!line.startsWith('data:')) continue
+          const payload = line.slice(5).trim()
+          if (payload === '[DONE]') break readLoop
+          let chunk: any
+          try { chunk = JSON.parse(payload) } catch { continue }
+          const choice = chunk.choices?.[0]
+          if (!choice) continue
+          const d = choice.delta ?? {}
+          if (typeof d.content === 'string' && d.content) {
+            if (!textStarted) { textStarted = true; await writeEvent('text_start', { index: 0 }) }
+            text += d.content
+            await writeEvent('text_delta', { index: 0, text: d.content })
+          }
+          for (const tc of d.tool_calls ?? []) {
+            const i = tc.index ?? 0
+            if (!calls[i]) calls[i] = { id: tc.id ?? `call_${i}`, name: '', args: '' }
+            if (tc.id) calls[i]!.id = tc.id
+            if (tc.function?.name && !calls[i]!.name) {
+              calls[i]!.name = tc.function.name
+              await writeEvent('tool_start', { index: i, id: calls[i]!.id, name: calls[i]!.name })
+            }
+            if (tc.function?.arguments) {
+              calls[i]!.args += tc.function.arguments
+              await writeEvent('tool_input_delta', { index: i, partial_json: tc.function.arguments })
+            }
+          }
+          if (choice.finish_reason) finish = choice.finish_reason
+        }
+      }
+
+      if (finish === 'tool_calls' && calls.length > 0) {
+        conv.push({
+          role: 'assistant',
+          content: text || null,
+          tool_calls: calls.map(cl => ({
+            id: cl.id, type: 'function',
+            function: { name: cl.name, arguments: cl.args || '{}' },
+          })),
+        })
+        for (const cl of calls) {
+          let input: any = {}
+          try { input = JSON.parse(cl.args || '{}') } catch {}
+          await writeEvent('tool_run', { id: cl.id, name: cl.name, input })
+          try {
+            const result = await executeTool(cl.name, input, user.id)
+            await writeEvent('tool_result', { id: cl.id, name: cl.name, result })
+            conv.push({ role: 'tool', tool_call_id: cl.id, content: JSON.stringify(result).slice(0, 8000) })
+          } catch (e: any) {
+            const errMsg = String(e?.message || e)
+            await writeEvent('tool_result', { id: cl.id, name: cl.name, result: { error: errMsg } })
+            conv.push({ role: 'tool', tool_call_id: cl.id, content: JSON.stringify({ error: errMsg }) })
+          }
+        }
+        continue // 次のループへ（ツール結果を踏まえた応答）
+      }
+      await writeEvent('done', { stop_reason: finish ?? 'stop' })
+      return
+    }
+    await writeEvent('done', { stop_reason: 'max_loops' })
+  }, async (err, s) => {
+    await s.write(`event: error\ndata: ${JSON.stringify({ message: String(err.message) })}\n\n`)
+  })
+}
+
 // === メインエンドポイント ===
 aiRoutes.post('/chat', async (c) => {
   const user = c.get('currentUser') as { id: string; name: string } | undefined
   if (!user) return c.json({ error: 'Not authenticated' }, 401)
 
-  const apiKey = process.env.ANTHROPIC_API_KEY
-  if (!apiKey) return c.json({ error: 'ANTHROPIC_API_KEY not set' }, 500)
-
   const body = await c.req.json()
   const messages: Anthropic.MessageParam[] = body.messages || []
   const ctx = body.context || {}  // 現在の画面情報など
+
+  // OPENAI_API_KEYがあればOpenAIを使う（AI_PROVIDERで明示切替可）
+  if (aiProvider() === 'openai') return openaiChat(c, user, messages as any[], ctx)
+
+  const apiKey = process.env.ANTHROPIC_API_KEY
+  if (!apiKey) return c.json({ error: 'ANTHROPIC_API_KEY not set' }, 500)
 
   const client = new Anthropic({ apiKey })
 
@@ -363,7 +507,7 @@ aiRoutes.post('/chat', async (c) => {
     ]
     sys.push({
       type: 'text',
-      text: `# 現在のユーザー\n名前: ${user.name}\nID: ${user.id}\n\n# 現在の画面コンテキスト\n${JSON.stringify(ctx, null, 2)}\n\n# 今日: ${new Date().toISOString().slice(0, 10)}`,
+      text: `# 現在のユーザー\n名前: ${user.name}\nID: ${user.id}\n\n# 現在の画面コンテキスト\n${JSON.stringify(ctx, null, 2)}\n\n# 今日: ${new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' })}`,
     })
 
     const writeEvent = async (event: string, data: any) => {

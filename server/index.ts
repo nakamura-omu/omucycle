@@ -12,10 +12,24 @@ import { cyclesRoutes } from './routes/cycles.js';
 import { wikiRoutes } from './routes/wiki.js';
 import { notificationsRoutes } from './routes/notifications.js';
 import { browseRoutes } from './routes/browse.js';
-import { atlasRoutes } from './routes/atlas.js';
+// アトラスは2026-07-10廃止（外部コラボツールに役割を移管）。routes/atlas.tsは未マウントで温存
 import { aiRoutes } from './routes/ai.js';
+import { directoryRoutes } from './routes/directory.js';
+import { displayName } from './directory.js';
 
 const app = new Hono();
+
+// 自己migration: Directoryハイブリッド化の第1段としてusersにomuid(AD/Directoryの正典ID)を持つ。
+// 氏名・所属はコピーせずポインタのみ（OMU365原則1）
+{
+  const db = getDb();
+  const cols = db.prepare('PRAGMA table_info(users)').all() as { name: string }[];
+  if (!cols.find((c) => c.name === 'omuid')) {
+    console.log('Migrating: adding users.omuid...');
+    db.exec('ALTER TABLE users ADD COLUMN omuid TEXT');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_users_omuid ON users(omuid)');
+  }
+}
 
 app.use('*', logger());
 
@@ -30,7 +44,7 @@ const allowedOrigins = [
 app.use('*', cors({
   origin: allowedOrigins,
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization', 'X-Auth-Email', 'X-Auth-Name', 'X-Api-Key'],
+  allowHeaders: ['Content-Type', 'Authorization', 'X-Auth-Email', 'X-Auth-Name', 'X-Api-Key', 'X-Shell-Probe'],
   credentials: true,
 }));
 
@@ -46,7 +60,7 @@ app.use('/api/*', async (c, next) => {
       const onBehalfOf = c.req.header('X-On-Behalf-Of');
       if (onBehalfOf) {
         const db = getDb();
-        const u = db.prepare('SELECT id, email, name, auth_type FROM users WHERE email = ?').get(onBehalfOf) as any;
+        const u = db.prepare('SELECT id, email, name, auth_type, omuid FROM users WHERE email = ?').get(onBehalfOf) as any;
         if (u) c.set('currentUser', u);
       }
     } else {
@@ -57,17 +71,37 @@ app.use('/api/*', async (c, next) => {
   // 2) Entra ID ヘッダ認証（nginx 経由）
   const email = c.req.header('X-Auth-Email');
   const encodedName = c.req.header('X-Auth-Name');
+  const omuid = c.req.header('X-Auth-User') || null; // Directory正典のID（nginxがauth_requestから転送）
+  // 共通シェルのバッジ取得等の覗き見は読み取り専用（未利用者を勝手にプロビジョニングしない）
+  const probe = c.req.header('X-Shell-Probe') === '1';
   if (email && !c.get('currentUser')) {
     const name = encodedName ? decodeURIComponent(encodedName) : email.split('@')[0];
     const db = getDb();
-    let user = db.prepare('SELECT id, email, name, auth_type FROM users WHERE email = ?').get(email) as any;
+    let user = db.prepare('SELECT id, email, name, auth_type, omuid FROM users WHERE email = ?').get(email) as any;
     if (!user) {
+      if (probe) { await next(); return; } // 未利用者のプローブは素通し（各routeが401を返す）
       const id = uuidv4();
-      db.prepare('INSERT INTO users (id, email, name, auth_type) VALUES (?, ?, ?, ?)').run(id, email, name, 'sso');
-      user = { id, email, name, auth_type: 'sso' };
-      console.log(`Auto-created SSO user: ${email} (${name})`);
+      db.prepare('INSERT INTO users (id, email, name, auth_type, omuid) VALUES (?, ?, ?, ?, ?)')
+        .run(id, email, name, 'sso', omuid);
+      user = { id, email, name, auth_type: 'sso', omuid };
+      console.log(`Auto-created SSO user: ${email} (${name}, omuid=${omuid ?? '-'})`);
+    } else if (omuid && user.omuid !== omuid) {
+      // 既存ユーザーの後追い紐付け（omuid列追加以前に作られたユーザー）
+      db.prepare('UPDATE users SET omuid = ?, updated_at = datetime(\'now\') WHERE id = ?').run(omuid, user.id);
+      user.omuid = omuid;
     }
-    ensurePersonalSpace(user.id, name);
+    // 氏名はDirectoryが正典。ローカルのnameは表示キャッシュで、ログイン時にリフレッシュ
+    // （Directoryクライアント側5分キャッシュ。取れなければ現状維持）
+    if (!probe && user.omuid) {
+      try {
+        const dn = await displayName(user.omuid);
+        if (dn && dn !== user.name) {
+          db.prepare('UPDATE users SET name = ?, updated_at = datetime(\'now\') WHERE id = ?').run(dn, user.id);
+          user.name = dn;
+        }
+      } catch {}
+    }
+    if (!probe) ensurePersonalSpace(user.id, user.name);
     c.set('currentUser', user);
   }
   await next();
@@ -93,7 +127,7 @@ function ensurePersonalSpace(userId: string, userName: string): {
   if (!group) {
     const groupId = uuidv4();
     const baseSlug = `personal-${userId.slice(0, 8)}`;
-    db.prepare(`INSERT INTO groups (id, name, slug, created_by) VALUES (?, ?, ?, ?)`)
+    db.prepare(`INSERT INTO groups (id, name, slug, is_personal, created_by) VALUES (?, ?, ?, 1, ?)`)
       .run(groupId, `${userName} の個人スペース`, baseSlug, userId);
     db.prepare(`INSERT INTO group_memberships (id, group_id, user_id, role) VALUES (?, ?, ?, 'owner')`)
       .run(uuidv4(), groupId, userId);
@@ -131,16 +165,15 @@ const mountAll = (basePath: string) => {
   app.route(`${basePath}/wiki`, wikiRoutes);
   app.route(`${basePath}/notifications`, notificationsRoutes);
   app.route(`${basePath}/browse`, browseRoutes);
-  app.route(`${basePath}/atlas`, atlasRoutes);
   app.route(`${basePath}/ai`, aiRoutes);
+  app.route(`${basePath}/directory`, directoryRoutes);
 };
 
 mountAll('/api');     // 既存パス（フロントが使用中）
 mountAll('/api/v1');  // バージョン明示パス（外部アプリ向け、将来 v2 を出しても v1 を維持）
 
-const PORT = parseInt(process.env.API_PORT || '3180');
-console.log(`Starting OmuCycle API server on port ${PORT}...`);
+const PORT = parseInt(process.env.CYCLE_API_PORT || '3260');
 
-serve({ fetch: app.fetch, port: PORT }, (info) => {
-  console.log(`OmuCycle API server running at http://localhost:${info.port}`);
+serve({ fetch: app.fetch, port: PORT, hostname: '127.0.0.1' }, (info) => {
+  console.log(`OmuCycle API server running at http://127.0.0.1:${info.port}`);
 });

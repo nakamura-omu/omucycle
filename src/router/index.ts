@@ -3,7 +3,8 @@ import { createRouter, createWebHistory } from 'vue-router'
 const router = createRouter({
   history: createWebHistory('/cycle/'),
   routes: [
-    { path: '/', name: 'home', component: () => import('@/views/GroupList.vue') },
+    // ホーム = インボックス（Todoist流: 開いたら自分のタスク）
+    { path: '/', name: 'home', redirect: '/my' },
 
     // === マイ ===
     { path: '/my', name: 'my-home', component: () => import('@/views/Inbox2.vue') },
@@ -13,7 +14,6 @@ const router = createRouter({
     { path: '/my/filters', name: 'my-filters', component: () => import('@/views/FiltersView.vue') },
     { path: '/my/tasks', name: 'my-tasks', component: () => import('@/views/MyTasks.vue') },
     { path: '/my/calendar', name: 'my-calendar', component: () => import('@/views/MyCalendar.vue') },
-    { path: '/my/board', name: 'my-board', component: () => import('@/views/MyBoardRedirect.vue') },
 
     // === グローバル ===
     { path: '/notifications', name: 'notifications', component: () => import('@/views/Inbox.vue') },
@@ -27,17 +27,15 @@ const router = createRouter({
       name: 'group',
       component: () => import('@/views/GroupHome.vue'),
       children: [
-        { path: '', name: 'group-dashboard', component: () => import('@/views/GroupDashboard.vue') },
+        // グループはタスク中心: ランディング=タスク一覧（ダッシュボード/アトラス廃止 2026-07-10）
+        { path: '', name: 'group-home', redirect: (to) => `/${to.params.groupSlug}/tasks` },
         { path: 'projects', name: 'project-list', component: () => import('@/views/ProjectList.vue') },
         { path: 'calendar', name: 'group-calendar', component: () => import('@/views/GroupCalendar.vue') },
         { path: 'wiki', name: 'wiki-home', component: () => import('@/views/WikiHome.vue') },
         { path: 'wiki/:pageSlug', name: 'wiki-page', component: () => import('@/views/WikiPage.vue') },
         { path: 'settings', name: 'group-settings', component: () => import('@/views/GroupSettings.vue') },
         { path: 'tasks', name: 'group-tasks', component: () => import('@/views/TaskList.vue') },
-        { path: 'atlas', name: 'group-atlas', component: () => import('@/views/GroupAtlas.vue') },
-        { path: 'atlas/:projectSlug', name: 'project-atlas', component: () => import('@/views/ProjectAtlas.vue') },
         { path: 'cycles', name: 'group-cycles', component: () => import('@/views/GroupCycleList.vue') },
-        { path: 'files', name: 'group-files', component: () => import('@/views/GroupFiles.vue') },
 
         // プロジェクト配下
         { path: ':projectSlug', name: 'project-home', component: () => import('@/views/ProjectHome.vue') },

@@ -9,6 +9,11 @@ import { useTaskPanelStore } from '@/stores/taskPanel'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle,
+} from '@/components/ui/dialog'
+import RecurrencePicker from '@/components/task/RecurrencePicker.vue'
+import type { TaskRecurrence } from '@/stores/tasks'
 
 const panelStore = useTaskPanelStore()
 const groupsStore = useGroupsStore()
@@ -32,6 +37,30 @@ const PRIORITY_OPTIONS = [
   { value: 'normal', label: '通常' },
   { value: 'none', label: '－' },
 ] as const
+
+// === プロジェクト移動（所属グループ横断） ===
+interface MoveTargetGroup {
+  group_id: string; group_name: string; group_slug: string
+  projects: { id: string; name: string; slug: string; icon?: string; is_personal: number }[]
+}
+const moveTargets = ref<MoveTargetGroup[]>([])
+async function loadMoveTargets() {
+  if (moveTargets.value.length || !userStore.currentUser?.id) return
+  const res = await api(`/api/users/${userStore.currentUser.id}/move-targets`)
+  if (res.ok) moveTargets.value = await res.json()
+}
+async function moveToProject(projectId: string) {
+  if (!task.value || projectId === task.value.project_id) return
+  let name = 'プロジェクト'
+  for (const g of moveTargets.value) {
+    const p = g.projects.find(x => x.id === projectId)
+    if (p) { name = p.is_personal ? 'インボックス' : `${g.group_name} / ${p.name}`; break }
+  }
+  await tasksStore.moveToProject(task.value.id, projectId, name)
+  // 移動でプロジェクト/タスク番号が変わり、現在のslug基準の解決が無効になるためパネルを閉じる
+  // （取り消しは左下のUndoトーストから可能）
+  close()
+}
 
 async function loadTask() {
   if (!isOpen.value) {
@@ -73,6 +102,7 @@ async function loadTask() {
     task.value = tasksStore.currentTask
     titleEdit.value = task.value?.title || ''
     descEdit.value = task.value?.description || ''
+    loadMoveTargets()
   } finally {
     isLoading.value = false
   }
@@ -173,9 +203,25 @@ async function changeStartDate(date: string) {
 }
 async function changeDueDate(date: string) {
   if (!task.value) return
+  // 期限を消したら時刻も消す（時刻だけの期限は成立しない）
+  const patch: any = { due_date: date || null, updated_by: userStore.currentUser?.id }
+  if (!date) patch.due_time = null
+  await tasksStore.updateTask(task.value.id, patch)
+  if (!date && task.value) task.value.due_time = null
+}
+async function changeDueTime(time: string) {
+  if (!task.value) return
   await tasksStore.updateTask(task.value.id, {
-    due_date: date || null, updated_by: userStore.currentUser?.id,
-  } as any)
+    due_time: time || null, updated_by: userStore.currentUser?.id,
+  } as any, { silent: true })
+  task.value.due_time = time || null
+}
+
+// === 繰り返し設定（モーダル） ===
+const showRecurrence = ref(false)
+function onRecurrenceUpdated(rec: TaskRecurrence | null) {
+  if (task.value) task.value.recurrence = rec
+  showRecurrence.value = false
 }
 
 async function addLabel() {
@@ -314,7 +360,26 @@ function formatDate(s: string) {
                 @change="changeDueDate(($event.target as HTMLInputElement).value)"
                 class="h-8 rounded-md border border-input bg-background px-2 text-xs"
               />
+              <input
+                type="time"
+                :value="task.due_time || ''"
+                :disabled="!task.due_date"
+                title="時刻（任意。M365カレンダー連携用）"
+                @change="changeDueTime(($event.target as HTMLInputElement).value)"
+                class="h-8 rounded-md border border-input bg-background px-2 text-xs disabled:opacity-40"
+              />
             </label>
+
+            <!-- 繰り返し設定 -->
+            <button
+              class="h-8 rounded-md border border-input bg-background px-2 text-xs flex items-center gap-1 hover:bg-muted"
+              :class="{ 'text-info border-info/50': task.recurrence }"
+              title="繰り返しを設定"
+              @click="showRecurrence = true"
+            >
+              <span>🔁</span>
+              <span>{{ task.recurrence?.rule_text || '繰り返し' }}</span>
+            </button>
 
             <select
               v-if="projectsStore.cycles.length > 0"
@@ -324,6 +389,20 @@ function formatDate(s: string) {
             >
               <option value="">サイクル: なし</option>
               <option v-for="c in projectsStore.cycles" :key="c.id" :value="c.id">{{ c.name }}</option>
+            </select>
+
+            <!-- プロジェクト移動（所属グループ横断） -->
+            <select
+              :value="task.project_id"
+              @change="moveToProject(($event.target as HTMLSelectElement).value)"
+              class="h-8 rounded-md border border-input bg-background px-2 text-xs max-w-[180px]"
+              title="別のプロジェクトへ移動"
+            >
+              <optgroup v-for="g in moveTargets" :key="g.group_id" :label="g.group_name">
+                <option v-for="p in g.projects" :key="p.id" :value="p.id">
+                  {{ p.is_personal ? '📥 インボックス' : `${p.icon || '📁'} ${p.name}` }}
+                </option>
+              </optgroup>
             </select>
 
             <!-- 担当者 -->
@@ -448,6 +527,24 @@ function formatDate(s: string) {
             </div>
           </div>
         </div>
+
+        <!-- 繰り返し設定モーダル -->
+        <Dialog v-model:open="showRecurrence">
+          <DialogContent class="sm:max-w-[440px]">
+            <DialogHeader>
+              <DialogTitle>🔁 繰り返し設定</DialogTitle>
+            </DialogHeader>
+            <p class="text-xs text-muted-foreground -mt-2">
+              完了すると期限が次回に進みます（タスクは完了になりません）
+            </p>
+            <RecurrencePicker
+              v-if="task"
+              :task-id="task.id"
+              :initial="task.recurrence"
+              @updated="onRecurrenceUpdated"
+            />
+          </DialogContent>
+        </Dialog>
       </aside>
     </div>
   </Transition>

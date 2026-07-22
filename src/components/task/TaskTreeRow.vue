@@ -15,6 +15,8 @@ defineProps<{
   groupSlug?: string
   projectSlug?: string
   draggable?: boolean
+  dragOverTaskId?: string | null
+  dragOverPos?: 'above' | 'below' | 'child' | null
 }>()
 
 const emit = defineEmits<{
@@ -39,6 +41,7 @@ function toggleCollapse() { collapsed.value = !collapsed.value }
       :draggable="draggable"
       :collapsible="node.children.length > 0"
       :collapsed="collapsed"
+      :drop-indicator="node.task.id === dragOverTaskId ? dragOverPos : null"
       @toggle="(t) => emit('toggle', t)"
       @click="(t) => emit('click', t)"
       @dragstart="(e, t) => emit('dragstart', e, t)"
@@ -55,6 +58,8 @@ function toggleCollapse() { collapsed.value = !collapsed.value }
         :group-slug="groupSlug"
         :project-slug="projectSlug"
         :draggable="draggable"
+        :drag-over-task-id="dragOverTaskId"
+        :drag-over-pos="dragOverPos"
         @toggle="(t) => emit('toggle', t)"
         @click="(t) => emit('click', t)"
         @dragstart="(e, t) => emit('dragstart', e, t)"

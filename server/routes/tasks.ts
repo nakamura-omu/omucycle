@@ -69,6 +69,63 @@ function recordHistory(
   `).run(uuidv4(), taskId, userId, actionType, fieldName, oldValue, newValue);
 }
 
+// === 繰り返しの次回期限計算（Todoist流: 完了すると期限が次回に進む） ===
+// 期限切れのまま完了した場合は今日を基準に次回を探す（溜まった過去分を量産しない）
+function computeNextDue(
+  ruleKind: string,
+  ruleJson: { interval?: number; weekdays?: number[]; day_of_month?: number; month_of_year?: number },
+  currentDue: string | null
+): string | null {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const parse = (s: string) => {
+    const [y, m, d] = s.split('-').map(Number);
+    return new Date(y!, (m ?? 1) - 1, d ?? 1);
+  };
+  const fmt = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const addDays = (d: Date, n: number) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+
+  const anchor = currentDue ? parse(currentDue) : today;
+  const base = anchor > today ? anchor : today;
+  const interval = Math.max(1, ruleJson.interval ?? 1);
+
+  if (ruleKind === 'daily') return fmt(addDays(base, interval));
+
+  if (ruleKind === 'weekly') {
+    const weekdays = ruleJson.weekdays?.length ? ruleJson.weekdays : [anchor.getDay()];
+    for (let i = 1; i <= interval * 7 + 7; i++) {
+      const d = addDays(base, i);
+      if (!weekdays.includes(d.getDay())) continue;
+      if (interval === 1) return fmt(d);
+      const wk = Math.floor((d.getTime() - anchor.getTime()) / (7 * 86400000));
+      if (((wk % interval) + interval) % interval === 0) return fmt(d);
+    }
+    return fmt(addDays(base, interval * 7));
+  }
+
+  if (ruleKind === 'monthly') {
+    const dom = ruleJson.day_of_month ?? anchor.getDate();
+    for (let i = 0; i <= 36; i++) {
+      const y = anchor.getFullYear();
+      const m = anchor.getMonth() + i * interval;
+      const daysInMonth = new Date(y, m + 1, 0).getDate();
+      const d = new Date(y, m, Math.min(dom, daysInMonth));
+      if (d > base) return fmt(d);
+    }
+    return null;
+  }
+
+  if (ruleKind === 'yearly') {
+    const dom = ruleJson.day_of_month ?? anchor.getDate();
+    const moy = (ruleJson.month_of_year ?? anchor.getMonth() + 1) - 1;
+    for (let i = 0; i <= 5; i++) {
+      const d = new Date(base.getFullYear() + i, moy, dom);
+      if (d > base) return fmt(d);
+    }
+  }
+  return null;
+}
+
 // タスク詳細取得（子タスク・進捗ログ・繰り返し含む）
 tasksRoutes.get('/:id', (c) => {
   const db = getDb();
@@ -76,7 +133,7 @@ tasksRoutes.get('/:id', (c) => {
 
   const task = db.prepare(`
     SELECT t.*,
-           u.name as assignee_name,
+           u.name as assignee_name, u.omuid as assignee_omuid,
            creator.name as created_by_name,
            g.name as group_name, g.slug as group_slug,
            p.name as project_name, p.slug as project_slug, p.prefix as project_prefix,
@@ -93,7 +150,7 @@ tasksRoutes.get('/:id', (c) => {
   if (!task) return c.json({ error: 'Task not found' }, 404);
 
   const children = db.prepare(`
-    SELECT t.*, u.name as assignee_name
+    SELECT t.*, u.name as assignee_name, u.omuid as assignee_omuid
     FROM tasks t
     LEFT JOIN users u ON t.assignee_id = u.id
     WHERE t.parent_task_id = ?
@@ -121,7 +178,7 @@ tasksRoutes.post('/', async (c) => {
   const db = getDb();
   const body = await c.req.json();
   const {
-    project_id, title, description, start_date, due_date,
+    project_id, title, description, start_date, due_date, due_time,
     status = 'not_started', priority = 'normal',
     assignee_id, assignee_ids, created_by, parent_task_id, cycle_id, labels,
     is_section = false,
@@ -154,13 +211,13 @@ tasksRoutes.post('/', async (c) => {
     db.prepare(`
       INSERT INTO tasks (
         id, project_id, cycle_id, group_id, parent_task_id, task_number, depth, is_section,
-        title, description, start_date, due_date, status, priority,
+        title, description, start_date, due_date, due_time, status, priority,
         assignee_id, assignee_ids, labels, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, project_id, cycle_id ?? null, project.group_id,
       parent_task_id ?? null, taskNumber, depth, is_section ? 1 : 0,
-      title, description ?? null, start_date ?? null, due_date ?? null,
+      title, description ?? null, start_date ?? null, due_date ?? null, due_time ?? null,
       status, priority,
       assignee_id ?? null,
       assignee_ids ? JSON.stringify(assignee_ids) : null,
@@ -186,6 +243,57 @@ tasksRoutes.post('/', async (c) => {
   return c.json(db.prepare('SELECT * FROM tasks WHERE id = ?').get(id), 201);
 });
 
+// プロジェクト間移設（サイドバーへのD&D等）。
+// サブツリーごと移動し、移動先でtask_numberを再採番。cycle_idは移動先に存在しないためリセット。
+// トップのparent_task_idは外す（セクション/親は移動元の文脈なので持ち込まない）
+tasksRoutes.post('/:id/move-to-project', async (c) => {
+  const db = getDb();
+  const id = c.req.param('id');
+  const body = await c.req.json();
+  const { project_id } = body;
+  if (!project_id) return c.json({ error: 'project_id is required' }, 400);
+
+  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as any;
+  if (!task) return c.json({ error: 'Task not found' }, 404);
+  if (task.project_id === project_id) return c.json({ moved: false, task });
+
+  const project = db.prepare('SELECT id, group_id, next_task_number FROM projects WHERE id = ?')
+    .get(project_id) as { id: string; group_id: string; next_task_number: number } | undefined;
+  if (!project) return c.json({ error: 'Project not found' }, 404);
+
+  // サブツリー（非セクションの子孫）を収集
+  const subtree: any[] = [];
+  const collect = (parentId: string, depth: number) => {
+    const children = db.prepare('SELECT * FROM tasks WHERE parent_task_id = ?').all(parentId) as any[];
+    for (const ch of children) { subtree.push({ ...ch, _newDepth: depth }); collect(ch.id, depth + 1); }
+  };
+  collect(id, 1);
+
+  const prev = { project_id: task.project_id, group_id: task.group_id,
+                 parent_task_id: task.parent_task_id, cycle_id: task.cycle_id };
+
+  let n = project.next_task_number ?? 0;
+  const moveOne = db.prepare(`
+    UPDATE tasks SET project_id = ?, group_id = ?, cycle_id = NULL, task_number = ?,
+                     parent_task_id = ?, depth = ?, updated_at = datetime('now')
+    WHERE id = ?`);
+  const tx = db.transaction(() => {
+    moveOne.run(project.id, project.group_id, ++n, null, 0, id);
+    for (const ch of subtree) {
+      moveOne.run(project.id, project.group_id, ++n, ch.parent_task_id, ch._newDepth, ch.id);
+    }
+    db.prepare(`UPDATE projects SET next_task_number = ?, updated_at = datetime('now') WHERE id = ?`)
+      .run(n, project.id);
+  });
+  tx();
+
+  return c.json({
+    moved: true,
+    previous: prev, // クライアントのUndo用（元プロジェクトへ再move）
+    task: db.prepare('SELECT * FROM tasks WHERE id = ?').get(id),
+  });
+});
+
 // タスク更新
 tasksRoutes.put('/:id', async (c) => {
   const db = getDb();
@@ -197,7 +305,7 @@ tasksRoutes.put('/:id', async (c) => {
   if (!oldTask) return c.json({ error: 'Task not found' }, 404);
 
   const allowed = [
-    'title', 'description', 'start_date', 'due_date', 'status', 'priority',
+    'title', 'description', 'start_date', 'due_date', 'due_time', 'status', 'priority',
     'assignee_id', 'assignee_ids', 'labels', 'cycle_id', 'parent_task_id', 'is_section',
     'atlas_layout_mode', 'atlas_columns',
   ];
@@ -304,8 +412,40 @@ tasksRoutes.patch('/:id/status', async (c) => {
     return c.json({ error: 'Invalid status' }, 400);
   }
 
-  const task = db.prepare('SELECT status FROM tasks WHERE id = ?').get(id) as { status: Status } | undefined;
+  const task = db.prepare('SELECT status, due_date FROM tasks WHERE id = ?')
+    .get(id) as { status: Status; due_date: string | null } | undefined;
   if (!task) return c.json({ error: 'Task not found' }, 404);
+
+  // 繰り返しタスクの完了 → 完了にせず期限を次回に進める（Todoist流）
+  if (status === 'completed' && task.status !== 'completed') {
+    const rec = db.prepare(
+      'SELECT * FROM task_recurrences WHERE task_id = ? AND active = 1'
+    ).get(id) as { id: string; rule_kind: string; rule_json: string } | undefined;
+    if (rec) {
+      let ruleJson: any = {};
+      try { ruleJson = JSON.parse(rec.rule_json); } catch {}
+      const nextDue = computeNextDue(rec.rule_kind, ruleJson, task.due_date);
+      if (nextDue) {
+        db.transaction(() => {
+          db.prepare(`
+            UPDATE tasks SET due_date = ?, status = 'not_started', updated_at = datetime('now')
+            WHERE id = ?
+          `).run(nextDue, id);
+          db.prepare(`
+            UPDATE task_recurrences SET next_due = ?, last_generated_at = datetime('now')
+            WHERE id = ?
+          `).run(nextDue, rec.id);
+        })();
+        if (updated_by) {
+          recordHistory(id, updated_by, 'recurred', 'due_date', task.due_date, nextDue);
+        }
+        return c.json({
+          success: true, status: 'not_started',
+          recurred: true, next_due: nextDue, previous_due: task.due_date,
+        });
+      }
+    }
+  }
 
   const completionUpdate = status === 'completed'
     ? `, completed_at = datetime('now')`
@@ -393,6 +533,15 @@ tasksRoutes.post('/reorder-bulk', async (c) => {
 
   const transaction = db.transaction(() => {
     for (const t of tasks) {
+      // parent_task_id はキーが明示されたときだけ変更する
+      // （sort_order だけの並び替えで親が NULL に飛ばないように。null 指定=トップへ移動）
+      if (!Object.prototype.hasOwnProperty.call(t, 'parent_task_id')) {
+        db.prepare(`
+          UPDATE tasks SET sort_order = ?, updated_at = datetime('now')
+          WHERE id = ?
+        `).run(t.sort_order ?? 0, t.id);
+        continue;
+      }
       if (t.parent_task_id === t.id) throw new Error('SELF_PARENT');
       let depth = 0;
       if (t.parent_task_id) {

@@ -7,7 +7,7 @@ import { resolve } from 'path'
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd())
   const basePath = env.VITE_BASE_PATH || '/'
-  const apiPort = env.VITE_API_PORT || '3180'
+  const apiPort = env.VITE_API_PORT || '3260'
 
   return {
     base: basePath,

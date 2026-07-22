@@ -12,10 +12,10 @@ const tasksStore = useTasksStore()
 const userStore = useUserStore()
 const taskPanelStore = useTaskPanelStore()
 
+import { localDateStr } from '@/lib/date'
+
 function todayStr() {
-  const d = new Date()
-  d.setHours(0, 0, 0, 0)
-  return d.toISOString().slice(0, 10)
+  return localDateStr()
 }
 
 async function load() {
@@ -79,6 +79,7 @@ const empty = computed(() => overdue.value.length === 0 && dueToday.value.length
               v-for="t in overdue"
               :key="t.id"
               :task="t"
+              :draggable="true"
               @toggle="toggleStatus"
               @click="openTask"
             />
@@ -97,6 +98,7 @@ const empty = computed(() => overdue.value.length === 0 && dueToday.value.length
               v-for="t in dueToday"
               :key="t.id"
               :task="t"
+              :draggable="true"
               @toggle="toggleStatus"
               @click="openTask"
             />

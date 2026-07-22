@@ -3,6 +3,7 @@ import { onMounted, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useGroupsStore } from '@/stores/groups'
 import GroupBasicSettings from '@/components/settings/GroupBasicSettings.vue'
+import GroupDirectoryLink from '@/components/settings/GroupDirectoryLink.vue'
 import GroupMemberSettings from '@/components/settings/GroupMemberSettings.vue'
 import PageContainer from '@/components/layout/PageContainer.vue'
 import PageHeader from '@/components/layout/PageHeader.vue'
@@ -25,6 +26,14 @@ function handleGroupUpdated(updated: any) {
 async function handleMembersChanged() {
   await groupsStore.fetchMembers(resolvedGroupId.value)
 }
+
+// 連携の設定/解除/同期後: グループ本体（連携フィールド）とメンバー両方を取り直す
+async function handleLinkChanged() {
+  await Promise.all([
+    groupsStore.fetchGroup(resolvedGroupId.value),
+    groupsStore.fetchMembers(resolvedGroupId.value),
+  ])
+}
 </script>
 
 <template>
@@ -35,6 +44,12 @@ async function handleMembersChanged() {
       :group="groupsStore.currentGroup"
       :group-slug="groupSlug"
       @updated="handleGroupUpdated"
+    />
+
+    <GroupDirectoryLink
+      :group-id="resolvedGroupId"
+      :group="groupsStore.currentGroup"
+      @link-changed="handleLinkChanged"
     />
 
     <GroupMemberSettings

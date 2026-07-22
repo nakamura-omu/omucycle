@@ -22,11 +22,41 @@ const groupSlug = computed(() => route.params.groupSlug as string)
 const projectFilter = ref<'all' | string>('all')
 const cycleFilter = ref<'all' | 'no_cycle' | string>('all')
 const ownerFilter = ref<'all' | 'me'>('all')
-const groupBy = ref<'status' | 'project' | 'cycle' | 'assignee' | 'none'>('status')
+// グループのタスク一覧は既定でプロジェクトごとに分類（各プロジェクト内をやること/完了に細分）
+const groupBy = ref<'status' | 'project' | 'cycle' | 'assignee' | 'none'>('project')
 const showCompleted = ref(false)
 const showOptions = ref(false)
 
 const collapsed = ref<Record<string, boolean>>({})
+
+// === 表示設定の永続化（グループ単位。cycle.groupview.<groupId>） ===
+function viewKey() {
+  const gid = groupsStore.currentGroup?.id
+  return gid ? `cycle.groupview.${gid}` : null
+}
+function restoreView() {
+  const key = viewKey()
+  if (!key) return
+  try {
+    const raw = localStorage.getItem(key)
+    if (!raw) return
+    const v = JSON.parse(raw)
+    if (v.groupBy) groupBy.value = v.groupBy
+    if (typeof v.showCompleted === 'boolean') showCompleted.value = v.showCompleted
+    if (v.ownerFilter) ownerFilter.value = v.ownerFilter
+    if (v.projectFilter) projectFilter.value = v.projectFilter
+  } catch { /* 破損時は既定のまま */ }
+}
+function saveView() {
+  const key = viewKey()
+  if (!key) return
+  localStorage.setItem(key, JSON.stringify({
+    groupBy: groupBy.value,
+    showCompleted: showCompleted.value,
+    ownerFilter: ownerFilter.value,
+    projectFilter: projectFilter.value,
+  }))
+}
 
 const newTaskTitle = ref('')
 const newTaskProjectId = ref<string>('')
@@ -41,6 +71,7 @@ async function load() {
     projectsStore.fetchGroupProjects(groupsStore.currentGroup.id),
     tasksStore.fetchGroupTasks(groupsStore.currentGroup.id),
   ])
+  restoreView()
   if (!newTaskProjectId.value && projectsStore.projects.length > 0) {
     newTaskProjectId.value = projectsStore.projects[0]!.id
   }
@@ -48,9 +79,11 @@ async function load() {
 
 onMounted(load)
 watch(groupSlug, load)
+watch([groupBy, showCompleted, ownerFilter, projectFilter], saveView)
 
 const filteredTasks = computed(() => {
-  let list = tasksStore.tasks
+  // セクション（is_section=1）は行として出さない。所属は各行の section_title チップで示す
+  let list = tasksStore.tasks.filter(t => !t.is_section)
   if (projectFilter.value !== 'all') list = list.filter(t => t.project_id === projectFilter.value)
   if (cycleFilter.value === 'no_cycle') list = list.filter(t => !t.cycle_id)
   else if (cycleFilter.value !== 'all') list = list.filter(t => t.cycle_id === cycleFilter.value)
@@ -69,7 +102,7 @@ const filteredTasks = computed(() => {
   return list
 })
 
-interface Bucket { key: string; label: string; tasks: Task[]; color?: string }
+interface Bucket { key: string; label: string; tasks: Task[]; color?: string; sub?: Bucket[] }
 
 const buckets = computed<Bucket[]>(() => {
   const list = filteredTasks.value
@@ -86,15 +119,30 @@ const buckets = computed<Bucket[]>(() => {
     return result
   }
   if (groupBy.value === 'project') {
+    // プロジェクトごとに分類し、各プロジェクト内をやること/完了に細分（2段）
     const map = new Map<string, Bucket>()
     for (const t of list) {
       const p = projectsStore.projects.find(x => x.id === t.project_id)
       const key = t.project_id || 'none'
-      const label = p ? `${p.icon ?? '📁'} ${p.name}` : '（不明）'
-      if (!map.has(key)) map.set(key, { key, label, tasks: [] })
+      const label = p ? `${p.icon ?? '📁'} ${p.name}` : '📥 未分類'
+      if (!map.has(key)) map.set(key, { key, label, tasks: [], sub: [] })
       map.get(key)!.tasks.push(t)
     }
-    return [...map.values()]
+    for (const b of map.values()) {
+      const todo = b.tasks.filter(t => t.status !== 'completed')
+      const done = b.tasks.filter(t => t.status === 'completed')
+      const sub: Bucket[] = []
+      if (todo.length > 0) sub.push({ key: `${b.key}:todo`, label: 'やること', tasks: todo, color: 'bg-info' })
+      if (showCompleted.value && done.length > 0) {
+        sub.push({ key: `${b.key}:done`, label: '完了', tasks: done, color: 'bg-success' })
+      }
+      b.sub = sub
+    }
+    // バケットの並びはプロジェクトの正式順（sort_order）に固定。
+    // タスクの出現順に依存させない（移動でプロジェクトの並びが変わって見える問題の修正）
+    const order = new Map(projectsStore.projects.map((p, i) => [p.id, i]))
+    return [...map.values()].sort(
+      (a, b) => (order.get(a.key) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.key) ?? Number.MAX_SAFE_INTEGER))
   }
   if (groupBy.value === 'cycle') {
     const cycles = projectsStore.cycles
@@ -126,6 +174,16 @@ const buckets = computed<Bucket[]>(() => {
     }
   }
   return [...map.values()]
+})
+
+// 実際にタスクを持つ最下層バケット（2段のときは sub、1段のときは自身）。並べ替えの探索に使う
+const leafBuckets = computed<Bucket[]>(() => {
+  const out: Bucket[] = []
+  for (const b of buckets.value) {
+    if (b.sub && b.sub.length) out.push(...b.sub)
+    else out.push(b)
+  }
+  return out
 })
 
 async function quickAdd() {
@@ -160,31 +218,70 @@ async function toggleStatus(task: Task) {
   if (t) t.status = task.status
 }
 
-// === ドラッグ並べ替え ===
+// === ドラッグ並べ替え（マウス位置で上/下挿入、赤線インジケーター表示） ===
 const dragTaskId = ref<string | null>(null)
+const dragOverTaskId = ref<string | null>(null)
+const dragOverPos = ref<'above' | 'below' | 'child' | null>(null)
 function onDragStart(_e: DragEvent, task: Task) {
   dragTaskId.value = task.id
 }
-function onDragOver(e: DragEvent, _task: Task) {
+function onDragEnd() {
+  dragTaskId.value = null
+  dragOverTaskId.value = null
+  dragOverPos.value = null
+}
+function onDragOver(e: DragEvent, task: Task) {
   e.preventDefault()
+  if (!dragTaskId.value || task.id === dragTaskId.value) {
+    dragOverTaskId.value = null; dragOverPos.value = null; return
+  }
+  const el = (e.currentTarget as HTMLElement | null)
+    ?? ((e.target as HTMLElement | null)?.closest?.('[data-task-row]') as HTMLElement | null)
+  if (!el) return
+  const rect = el.getBoundingClientRect()
+  dragOverTaskId.value = task.id
+  dragOverPos.value = e.clientY - rect.top >= rect.height / 2 ? 'below' : 'above'
 }
 async function onDrop(_e: DragEvent, dropTarget: Task) {
+  const pos = dragOverPos.value ?? 'above'
   if (!dragTaskId.value || dragTaskId.value === dropTarget.id) {
-    dragTaskId.value = null
+    onDragEnd()
     return
   }
   const dragId = dragTaskId.value
-  dragTaskId.value = null
-  // 同じバケット内の並べ替え
-  const bucket = buckets.value.find(b => b.tasks.find(t => t.id === dragId))
-  if (!bucket || !bucket.tasks.find(t => t.id === dropTarget.id)) return
-
+  onDragEnd()
+  const bucket = leafBuckets.value.find(b => b.tasks.find(t => t.id === dragId))
+  if (!bucket) return
   const dragTask = bucket.tasks.find(t => t.id === dragId)!
-  const dropIdx = bucket.tasks.findIndex(t => t.id === dropTarget.id)
-  const dragIdx = bucket.tasks.findIndex(t => t.id === dragId)
-  const reordered = [...bucket.tasks]
-  reordered.splice(dragIdx, 1)
-  reordered.splice(dropIdx, 0, dragTask)
+
+  // バケットまたぎのドロップ: グルーピング軸の属性を変更する（Todoist流）
+  if (!bucket.tasks.find(t => t.id === dropTarget.id)) {
+    const dstBucket = leafBuckets.value.find(b => b.tasks.find(t => t.id === dropTarget.id))
+    if (!dstBucket) return
+    // プロジェクト別表示: 別プロジェクトのバケットへ → プロジェクト移設
+    if (groupBy.value === 'project' && dropTarget.project_id
+        && dragTask.project_id !== dropTarget.project_id) {
+      const pb = buckets.value.find(b => b.key === dropTarget.project_id)
+      await tasksStore.moveToProject(dragId, dropTarget.project_id, pb?.label ?? '移動先プロジェクト')
+      if (groupsStore.currentGroup?.id) await tasksStore.fetchGroupTasks(groupsStore.currentGroup.id)
+      return
+    }
+    // やること⇆完了（status表示、またはproject表示内のサブバケット間）
+    const isDone = (b: Bucket) => b.key === 'completed' || b.key.endsWith(':done')
+    if ((groupBy.value === 'status' || groupBy.value === 'project') && isDone(dstBucket) !== isDone(bucket)) {
+      await tasksStore.updateStatus(dragId, isDone(dstBucket) ? 'completed' : 'not_started', userStore.currentUser?.id)
+      if (groupsStore.currentGroup?.id) await tasksStore.fetchGroupTasks(groupsStore.currentGroup.id)
+      return
+    }
+    // サイクル別・担当者別のまたぎは未対応（並べ替えのみ）
+    return
+  }
+
+  const snapshotOrders = bucket.tasks.map(t => ({ id: t.id, sort_order: t.sort_order ?? 0 }))
+  const reordered = bucket.tasks.filter(t => t.id !== dragId)
+  const dropIdx = reordered.findIndex(t => t.id === dropTarget.id)
+  if (dropIdx < 0) return
+  reordered.splice(dropIdx + (pos === 'below' ? 1 : 0), 0, dragTask)
   // sort_order を計算してバルク更新
   await api('/api/tasks/reorder-bulk', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -195,6 +292,15 @@ async function onDrop(_e: DragEvent, dropTarget: Task) {
   if (groupsStore.currentGroup?.id) {
     await tasksStore.fetchGroupTasks(groupsStore.currentGroup.id)
   }
+  tasksStore.showUndoToast('タスクを移動しました', async () => {
+    await api('/api/tasks/reorder-bulk', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tasks: snapshotOrders }),
+    })
+    if (groupsStore.currentGroup?.id) {
+      await tasksStore.fetchGroupTasks(groupsStore.currentGroup.id)
+    }
+  })
 }
 
 function openTask(t: Task) {
@@ -359,17 +465,45 @@ const groupByLabel = computed(() => ({
         </button>
 
         <div v-show="!collapsed[b.key]" class="pb-1">
-          <TaskRow
-            v-for="t in b.tasks"
-            :key="t.id"
-            :task="t"
-            :draggable="true"
-            @toggle="toggleStatus"
-            @click="openTask"
-            @dragstart="onDragStart"
-            @dragover="onDragOver"
-            @drop="onDrop"
-          />
+          <!-- 2段（プロジェクト内をやること/完了に細分） -->
+          <template v-if="b.sub && b.sub.length">
+            <div v-for="s in b.sub" :key="s.key">
+              <div class="flex items-center gap-2 pl-5 py-1 text-xs text-muted-foreground">
+                <span v-if="s.color" class="w-1.5 h-1.5 rounded-full" :class="s.color"></span>
+                <span>{{ s.label }}</span>
+                <span>{{ s.tasks.length }}</span>
+              </div>
+              <TaskRow
+                v-for="t in s.tasks"
+                :key="t.id"
+                :task="t"
+                :draggable="true"
+                :drop-indicator="t.id === dragOverTaskId ? dragOverPos : null"
+                @toggle="toggleStatus"
+                @click="openTask"
+                @dragstart="onDragStart"
+                @dragover="onDragOver"
+                @drop="onDrop"
+                @dragend="onDragEnd"
+              />
+            </div>
+          </template>
+          <!-- 1段 -->
+          <template v-else>
+            <TaskRow
+              v-for="t in b.tasks"
+              :key="t.id"
+              :task="t"
+              :draggable="true"
+              :drop-indicator="t.id === dragOverTaskId ? dragOverPos : null"
+              @toggle="toggleStatus"
+              @click="openTask"
+              @dragstart="onDragStart"
+              @dragover="onDragOver"
+              @drop="onDrop"
+              @dragend="onDragEnd"
+            />
+          </template>
         </div>
       </section>
     </div>

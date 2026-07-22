@@ -86,7 +86,7 @@ cyclesRoutes.delete('/:id', (c) => {
 cyclesRoutes.get('/:id/tasks', (c) => {
   const db = getDb();
   return c.json(db.prepare(`
-    SELECT t.*, u.name as assignee_name
+    SELECT t.*, u.name as assignee_name, u.omuid as assignee_omuid
     FROM tasks t
     LEFT JOIN users u ON t.assignee_id = u.id
     WHERE t.cycle_id = ?

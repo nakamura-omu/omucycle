@@ -54,6 +54,10 @@ function ensureColumn(table: string, column: string, def: string) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
   }
 }
+ensureColumn('users', 'omuid', 'TEXT'); // Directory正典IDへのポインタ（OMU365原則1）
+ensureColumn('groups', 'is_personal', 'INTEGER DEFAULT 0'); // 個人スペース（隠しコンテナ。UIには出さない）
+db.exec(`UPDATE groups SET is_personal = 1 WHERE is_personal = 0
+         AND id IN (SELECT DISTINCT group_id FROM projects WHERE is_personal = 1)`);
 ensureColumn('atlas_annotations', 'project_id', 'TEXT');
 ensureColumn('atlas_links', 'project_id', 'TEXT');
 ensureColumn('atlas_layout', 'project_id', 'TEXT');

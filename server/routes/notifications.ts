@@ -46,7 +46,21 @@ notificationsRoutes.get('/summary', (c) => {
     SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND read_at IS NULL
   `).get(user.id) as { count: number };
 
-  return c.json({ total: total.count, by_group: byGroup });
+  // 自分担当（+個人スペース）・未完了・期限が今日以前（超過含む）のタスク数。
+  // 共通シェルの要対応バッジ用。サーバーはUTCなので「今日」はJSTで明示的に計算する
+  const todayJst = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
+  const dueToday = db.prepare(`
+    SELECT COUNT(*) as count FROM tasks t
+    JOIN projects p ON t.project_id = p.id
+    WHERE t.status != 'completed' AND t.is_section = 0
+      AND t.due_date IS NOT NULL AND date(t.due_date) <= @today
+      AND (t.assignee_id = @uid
+           OR EXISTS (SELECT 1 FROM json_each(COALESCE(t.assignee_ids, '[]')) je
+                      WHERE je.value = @uid)
+           OR (p.is_personal = 1 AND p.owner_user_id = @uid))
+  `).get({ uid: user.id, today: todayJst }) as { count: number };
+
+  return c.json({ total: total.count, due_today: dueToday.count, by_group: byGroup });
 });
 
 // 既読化

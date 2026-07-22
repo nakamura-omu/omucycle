@@ -3,31 +3,34 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Todoist風ライトテーマ（2026-07-10 暖色化）:
+   白〜ウォームグレー基調 + 赤アクセント + ライトサイドバー。
+   Todoist実物の色感: 本文 #202020 / 赤 #dc4c3e / サイドバー #fcfaf8 */
 @theme inline {
-  --color-background: #f5f5f5;
-  --color-foreground: #1a1a2e;
+  --color-background: #ffffff;
+  --color-foreground: #202020;
   --color-card: #ffffff;
-  --color-card-foreground: #1a1a2e;
+  --color-card-foreground: #202020;
   --color-popover: #ffffff;
-  --color-popover-foreground: #1a1a2e;
-  --color-primary: #4cc9f0;
+  --color-popover-foreground: #202020;
+  --color-primary: #dc4c3e;
   --color-primary-foreground: #ffffff;
-  --color-secondary: #f0f0f0;
-  --color-secondary-foreground: #1a1a2e;
-  --color-muted: #f5f5f5;
-  --color-muted-foreground: #6b7280;
-  --color-accent: #f0f0f0;
-  --color-accent-foreground: #1a1a2e;
-  --color-destructive: #ef4444;
+  --color-secondary: #f5f3f1;
+  --color-secondary-foreground: #202020;
+  --color-muted: #f5f3f1;
+  --color-muted-foreground: #737373;
+  --color-accent: #f2efed;
+  --color-accent-foreground: #202020;
+  --color-destructive: #d1453b;
   --color-destructive-foreground: #ffffff;
-  --color-border: #e5e7eb;
-  --color-input: #e5e7eb;
-  --color-ring: #4cc9f0;
-  --color-sidebar: #1a1a2e;
-  --color-sidebar-dark: #16213e;
-  --color-sidebar-foreground: #e2e8f0;
-  --color-sidebar-accent: #2d3a5c;
-  --color-sidebar-accent-foreground: #e2e8f0;
+  --color-border: #eae7e4;
+  --color-input: #ddd9d5;
+  --color-ring: #dc4c3e;
+  --color-sidebar: #fcfaf8;
+  --color-sidebar-dark: #fcfaf8;
+  --color-sidebar-foreground: #202020;
+  --color-sidebar-accent: #e8e4e1;
+  --color-sidebar-accent-foreground: #202020;
   --radius-sm: 0.25rem;
   --radius-md: 0.375rem;
   --radius-lg: 0.5rem;
@@ -39,11 +42,13 @@
   --width-page: 1200px;
   --width-page-narrow: 800px;
 
-  /* ステータスカラー */
-  --color-success: #22c55e;
-  --color-warning: #f59e0b;
-  --color-danger: #ef4444;
-  --color-info: #4338ca;
+  /* ステータスカラー（Todoistの優先度色に整合: P1赤/P2橙/P3青） */
+  --color-success: #299438;
+  --color-success-foreground: #ffffff;
+  --color-warning: #eb8909;
+  --color-danger: #d1453b;
+  --color-info: #246fe0;
+  --color-info-foreground: #ffffff;
 }
 
 *,

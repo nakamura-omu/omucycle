@@ -7,14 +7,14 @@ import PageContainer from '@/components/layout/PageContainer.vue'
 import EmptyState from '@/components/layout/EmptyState.vue'
 import TaskRow from '@/components/task/TaskRow.vue'
 import { Card, CardContent } from '@/components/ui/card'
+import { localDateStr } from '@/lib/date'
 
 const tasksStore = useTasksStore()
 const userStore = useUserStore()
 const taskPanelStore = useTaskPanelStore()
 
 function dateStr(d: Date) {
-  d.setHours(0, 0, 0, 0)
-  return d.toISOString().slice(0, 10)
+  return localDateStr(d)
 }
 
 async function load() {
@@ -90,6 +90,7 @@ function openTask(task: Task) {
               v-for="t in b.tasks"
               :key="t.id"
               :task="t"
+              :draggable="true"
               @toggle="toggleStatus"
               @click="openTask"
             />

@@ -5,7 +5,7 @@ import { api } from '@/lib/api'
 export interface Group {
   id: string
   name: string
-  slug: string | null
+  slug: string
   created_by: string
   created_by_name: string
   member_count: number
@@ -23,26 +23,15 @@ export interface GroupMember {
   name: string
   role: 'owner' | 'admin' | 'member' | 'guest'
   joined_at: string
+  /** manual=手動追加 / directory=学内グループ連携のミラー（編集不可） */
+  via?: 'manual' | 'directory'
 }
 
 export const useGroupsStore = defineStore('groups', () => {
-  const groups = ref<Group[]>([])
   const myGroups = ref<Group[]>([])
   const currentGroup = ref<Group | null>(null)
   const members = ref<GroupMember[]>([])
   const isLoading = ref(false)
-
-  async function fetchGroups() {
-    isLoading.value = true
-    try {
-      const res = await api('/api/groups')
-      groups.value = await res.json()
-    } catch (error) {
-      console.error('Failed to fetch groups:', error)
-    } finally {
-      isLoading.value = false
-    }
-  }
 
   async function fetchMyGroups(userId: string) {
     try {
@@ -86,27 +75,21 @@ export const useGroupsStore = defineStore('groups', () => {
     }
   }
 
-  async function createGroup(name: string, slug: string | null, createdBy: string) {
+  async function createGroup(name: string, slug: string | null, createdBy: string): Promise<Group> {
     const res = await api('/api/groups', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, slug, created_by: createdBy }),
     })
-    if (res.ok) {
-      const newGroup = await res.json()
-      groups.value.unshift(newGroup)
-      return newGroup
-    }
+    if (res.ok) return await res.json()
     throw new Error('Failed to create group')
   }
 
   return {
-    groups,
     myGroups,
     currentGroup,
     members,
     isLoading,
-    fetchGroups,
     fetchMyGroups,
     fetchGroup,
     fetchGroupBySlug,
